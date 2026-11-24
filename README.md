@@ -2,7 +2,7 @@
 
 A private, read-only web chat for interviewers. They sign in with an emailed one-time code and ask about a project's code and the approach taken. Answers come from a read-only snapshot of the code and its paper trail. Each milestone's design and decisions are in [docs/changes](docs/changes), and built behaviour is in [docs/specs](docs/specs).
 
-> Status: M0 (scaffold). The server loads and validates its configuration and serves `/healthz`. Login, chat, and deployment arrive in M1 to M4.
+> Status: M1 (login). Interviewers can sign in with an emailed code; the signed-in page is a placeholder. Chat and deployment arrive in M2 to M4. See [docs/specs/auth.md](docs/specs/auth.md).
 
 ## Configuration
 

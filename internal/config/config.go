@@ -59,11 +59,16 @@ type Config struct {
 	CodeRequestsPerIPHour    int
 	CodeRequestsPerEmailHour int
 	VerifyAttemptsPerCode    int
+	VerifyPerIPHour          int
 	ChatPerSessionMinute     int
 	ChatPerIPMinute          int
 	MaxMessageChars          int
 	SessionTurnCap           int
 	ToolStepCap              int
+
+	// TrustForwardedFor makes the client IP come from the last X-Forwarded-For
+	// entry. Enable it only when a trusted reverse proxy (Tailscale Funnel) sets it.
+	TrustForwardedFor bool
 }
 
 // Load reads the configuration from the process environment.
@@ -98,11 +103,14 @@ func LoadFrom(getenv func(string) string) (*Config, error) {
 		CodeRequestsPerIPHour:    l.int("CODE_REQUESTS_PER_IP_HOUR", 10),
 		CodeRequestsPerEmailHour: l.int("CODE_REQUESTS_PER_EMAIL_HOUR", 3),
 		VerifyAttemptsPerCode:    l.int("VERIFY_ATTEMPTS_PER_CODE", 5),
+		VerifyPerIPHour:          l.int("VERIFY_PER_IP_HOUR", 30),
 		ChatPerSessionMinute:     l.int("CHAT_PER_SESSION_MINUTE", 6),
 		ChatPerIPMinute:          l.int("CHAT_PER_IP_MINUTE", 12),
 		MaxMessageChars:          l.int("MAX_MESSAGE_CHARS", 2000),
 		SessionTurnCap:           l.int("SESSION_TURN_CAP", 40),
 		ToolStepCap:              l.int("TOOL_STEP_CAP", 6),
+
+		TrustForwardedFor: l.bool("TRUST_FORWARDED_FOR", false),
 	}
 
 	if len(c.AllowedDomains) == 0 && len(c.AllowedEmails) == 0 {
@@ -129,6 +137,7 @@ func LoadFrom(getenv func(string) string) (*Config, error) {
 	for name, v := range map[string]int{
 		"SMTP_PORT": c.SMTPPort, "CODE_REQUESTS_PER_IP_HOUR": c.CodeRequestsPerIPHour,
 		"CODE_REQUESTS_PER_EMAIL_HOUR": c.CodeRequestsPerEmailHour, "VERIFY_ATTEMPTS_PER_CODE": c.VerifyAttemptsPerCode,
+		"VERIFY_PER_IP_HOUR":      c.VerifyPerIPHour,
 		"CHAT_PER_SESSION_MINUTE": c.ChatPerSessionMinute, "CHAT_PER_IP_MINUTE": c.ChatPerIPMinute,
 		"MAX_MESSAGE_CHARS": c.MaxMessageChars, "SESSION_TURN_CAP": c.SessionTurnCap, "TOOL_STEP_CAP": c.ToolStepCap,
 	} {
@@ -227,6 +236,18 @@ func (l *loader) int(name string, def int) int {
 		l.fail(name + " must be an integer")
 	}
 	return n
+}
+
+func (l *loader) bool(name string, def bool) bool {
+	v := strings.TrimSpace(l.getenv(name))
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		l.fail(name + " must be true or false")
+	}
+	return b
 }
 
 func (l *loader) duration(name string, def time.Duration) time.Duration {

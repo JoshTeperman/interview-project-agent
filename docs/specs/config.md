@@ -22,12 +22,14 @@ The server reads all settings from environment variables at startup (`internal/c
 | `SESSION_TTL` | no | `12h` | Go duration. |
 | `CODE_REQUESTS_PER_IP_HOUR` | no | `10` | |
 | `CODE_REQUESTS_PER_EMAIL_HOUR` | no | `3` | |
-| `VERIFY_ATTEMPTS_PER_CODE` | no | `5` | |
+| `VERIFY_ATTEMPTS_PER_CODE` | no | `5` | Wrong guesses before a code is discarded. |
+| `VERIFY_PER_IP_HOUR` | no | `30` | Verification attempts per IP. |
 | `CHAT_PER_SESSION_MINUTE` | no | `6` | |
 | `CHAT_PER_IP_MINUTE` | no | `12` | |
 | `MAX_MESSAGE_CHARS` | no | `2000` | |
 | `SESSION_TURN_CAP` | no | `40` | Chat turns per session. |
 | `TOOL_STEP_CAP` | no | `6` | Tool calls per turn (S-D2). |
+| `TRUST_FORWARDED_FOR` | no | `false` | Take the client IP from the last `X-Forwarded-For` entry. Only behind a trusted proxy. |
 
 All integer limits must be positive.
 
