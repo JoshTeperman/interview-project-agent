@@ -10,13 +10,15 @@ The server reads all settings from environment variables at startup (`internal/c
 | `LLM_MODEL` | no | `gpt-6-luna` / `claude-haiku-5-5` | The default depends on the provider. |
 | `OPENAI_API_KEY` | if provider is `openai` | | Dedicated key with a hard spend cap. |
 | `ANTHROPIC_API_KEY` | if provider is `anthropic` | | Dedicated key with a hard spend cap. |
+| `LLM_MAX_OUTPUT_TOKENS` | no | `16000` | Output token limit per model call, including reasoning. |
+| `LLM_TIMEOUT` | no | `120s` | Timeout per model call. Go duration. |
 | `SMTP_HOST` | no | `smtp.gmail.com` | |
 | `SMTP_PORT` | no | `587` | STARTTLS. |
 | `SMTP_USER` | yes | | |
 | `SMTP_PASS` | yes | | Google App Password. |
 | `SMTP_FROM_NAME` | no | `Josh Projects Guide` | |
-| `SNAPSHOT_DIR` | yes | | Must be an existing directory. Compose sets it to `/snapshot`. |
-| `DATA_DIR` | no | empty | Writable directory for the question log. Compose sets it to `/data`. |
+| `SNAPSHOT_DIR` | yes | | Must be an existing directory. Compose sets it to `/snapshot`. A malformed `project.json` there also stops startup. |
+| `DATA_DIR` | no | empty | Writable directory for the question log (`questions.jsonl`). Empty disables it. Compose sets it to `/data`. |
 | `LISTEN_ADDR` | no | `:8080` | |
 | `CODE_TTL` | no | `10m` | Go duration. |
 | `SESSION_TTL` | no | `12h` | Go duration. |
@@ -28,7 +30,9 @@ The server reads all settings from environment variables at startup (`internal/c
 | `CHAT_PER_IP_MINUTE` | no | `12` | |
 | `MAX_MESSAGE_CHARS` | no | `2000` | |
 | `SESSION_TURN_CAP` | no | `40` | Chat turns per session. |
-| `TOOL_STEP_CAP` | no | `6` | Tool calls per turn (S-D2). |
+| `TOOL_STEP_CAP` | no | `6` | Tool calls per question (S-D2). See [agent.md](agent.md). |
+| `TOOL_OUTPUT_MAX_CHARS` | no | `20000` | Text one tool call can return to the model. |
+| `OVERVIEW_MAX_CHARS` | no | `60000` | Size of the snapshot overview in the system prompt. |
 | `TRUST_FORWARDED_FOR` | no | `false` | Take the client IP from the last `X-Forwarded-For` entry. Only behind a trusted proxy. |
 
 All integer limits must be positive.

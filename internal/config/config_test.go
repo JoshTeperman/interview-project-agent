@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func env(t *testing.T, over map[string]string) func(string) string {
@@ -28,7 +29,8 @@ func TestLoadDefaults(t *testing.T) {
 	if c.LLMProvider != "openai" || c.LLMModel != "gpt-6-luna" {
 		t.Errorf("provider/model = %s/%s", c.LLMProvider, c.LLMModel)
 	}
-	if c.SMTPHost != "smtp.gmail.com" || c.SMTPPort != 587 || c.ToolStepCap != 6 {
+	if c.SMTPHost != "smtp.gmail.com" || c.SMTPPort != 587 || c.ToolStepCap != 6 ||
+		c.LLMMaxOutputTokens != 16000 || c.LLMTimeout != 120*time.Second || c.ToolOutputMaxChars != 20000 || c.OverviewMaxChars != 60000 {
 		t.Errorf("defaults wrong: %+v", c)
 	}
 	if got := strings.Join(c.AllowedDomains, ","); got != "example.com,other.org" {

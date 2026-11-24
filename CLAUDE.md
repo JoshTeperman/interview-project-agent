@@ -15,9 +15,11 @@ A private, read-only web chat that lets interviewers ask about a project's code 
 ## Layout
 
 - `cmd/server`: the web app entrypoint.
+- `cmd/compare`: runs the same questions against each LLM provider (billed).
+- `prompts/`: the model's standing instructions, embedded into the binary. Change prompts here, not in Go source.
 - `internal/`: config, HTTP server, auth, snapshot tools, LLM providers. Unit tests sit next to each package (`*_test.go`).
 - `web/`: embedded HTML, CSS, and vanilla JS (from M3).
-- `evaluation/`: fixture snapshots and agent-loop checks (from M2).
+- `evaluation/`: fixture snapshots (`fixtures/tiny-kv`) and comparison questions.
 - `deploy/`: VPS deployment files (from M4).
 
 ## Commands

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/JoshTeperman/interview-project-agent/internal/auth"
+	"github.com/JoshTeperman/interview-project-agent/internal/chat"
 	"github.com/JoshTeperman/interview-project-agent/internal/config"
 	"github.com/JoshTeperman/interview-project-agent/web"
 )
@@ -32,6 +33,7 @@ type Server struct {
 	cfg  *config.Config
 	auth *auth.Service
 	log  *slog.Logger
+	chat *chat.Service // nil until EnableChat
 
 	// Protected is the mux for routes that need a session. Later milestones register chat routes here.
 	Protected *http.ServeMux
@@ -150,7 +152,7 @@ func (s *Server) handleRequestCode(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email string `json:"email"`
 	}
-	if !decodeJSON(w, r, &req) {
+	if !decodeJSON(w, r, &req, maxAuthBody) {
 		return
 	}
 	ip := s.clientIP(r)
@@ -176,7 +178,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 		Code  string `json:"code"`
 	}
-	if !decodeJSON(w, r, &req) {
+	if !decodeJSON(w, r, &req, maxAuthBody) {
 		return
 	}
 	ip := s.clientIP(r)
@@ -204,6 +206,9 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(CookieName); err == nil {
 		s.auth.Logout(c.Value)
+		if s.chat != nil {
+			s.chat.Forget(sessionKey(c.Value))
+		}
 	}
 	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -229,13 +234,13 @@ func (s *Server) clientIP(r *http.Request) string {
 
 // decodeJSON requires a JSON content type (a simple CSRF defence, since cross-site
 // forms can't send it without a CORS preflight) and a small body.
-func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
 	mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if mt != "application/json" {
 		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Expected JSON.")
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxAuthBody)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Malformed request.")
 		return false
