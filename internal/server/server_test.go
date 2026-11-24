@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,9 +18,14 @@ import (
 	"github.com/JoshTeperman/interview-project-agent/internal/config"
 )
 
-type fakeMail struct{ bodies []string }
+type fakeMail struct {
+	mu     sync.Mutex
+	bodies []string
+}
 
 func (f *fakeMail) Send(_ context.Context, _, _, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.bodies = append(f.bodies, body)
 	return nil
 }
@@ -38,6 +44,7 @@ type harness struct {
 	mail *fakeMail
 	logs *bytes.Buffer
 	srv  *Server
+	auth *auth.Service
 }
 
 func newHarness(t *testing.T) *harness {
@@ -48,8 +55,10 @@ func newHarness(t *testing.T) *harness {
 		SessionTurnCap: 40,
 	}
 	m, logs := &fakeMail{}, &bytes.Buffer{}
-	s := New(cfg, auth.New(cfg, m, nil), slog.New(slog.NewJSONHandler(logs, nil)))
-	return &harness{h: s.Handler(), mail: m, logs: logs, srv: s}
+	log := slog.New(slog.NewJSONHandler(logs, nil))
+	a := auth.New(cfg, m, log, nil)
+	s := New(cfg, a, log)
+	return &harness{h: s.Handler(), mail: m, logs: logs, srv: s, auth: a}
 }
 
 func (h *harness) do(method, path, body string, cookie *http.Cookie) *httptest.ResponseRecorder {
@@ -62,6 +71,7 @@ func (h *harness) do(method, path, body string, cookie *http.Cookie) *httptest.R
 	}
 	w := httptest.NewRecorder()
 	h.h.ServeHTTP(w, r)
+	h.auth.Wait() // finish any background code email
 	return w
 }
 
@@ -148,7 +158,6 @@ func TestErrorStates(t *testing.T) {
 		status     int
 		code       string
 	}{
-		{"/api/auth/request", `{"email":"eve@gmail.com"}`, 403, "email_not_allowed"},
 		{"/api/auth/request", `{"email":"nope"}`, 400, "invalid_email"},
 		{"/api/auth/request", `{bad json`, 400, "bad_request"},
 		{"/api/auth/verify", `{"email":"a@example.com","code":"123456"}`, 401, "invalid_code"},
@@ -168,6 +177,18 @@ func TestErrorStates(t *testing.T) {
 	h.h.ServeHTTP(w, r)
 	if w.Code != http.StatusUnsupportedMediaType {
 		t.Errorf("form post: %d", w.Code)
+	}
+}
+
+func TestRequestDoesNotRevealAllowlist(t *testing.T) {
+	h := newHarness(t)
+	allowed := h.do("POST", "/api/auth/request", `{"email":"a@example.com"}`, nil)
+	denied := h.do("POST", "/api/auth/request", `{"email":"eve@gmail.com"}`, nil)
+	if allowed.Code != 200 || denied.Code != allowed.Code || denied.Body.String() != allowed.Body.String() {
+		t.Fatalf("allowed %d %q, disallowed %d %q", allowed.Code, allowed.Body, denied.Code, denied.Body)
+	}
+	if len(h.mail.bodies) != 1 {
+		t.Fatalf("sent %d emails, want 1", len(h.mail.bodies))
 	}
 }
 

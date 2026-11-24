@@ -1,6 +1,8 @@
 // Package auth implements email magic-code login and server-side sessions (S-D4).
 //
-// Codes are 6 digits, short-lived, single-use, and stored only as an HMAC
+// Requesting a code never reveals whether an email is allowed (001-D2): allowed
+// and disallowed addresses get the same answer, and the email is sent in the
+// background so response time doesn't differ either. Codes are 6 digits, short-lived, single-use, and stored only as an HMAC
 // keyed with a per-process secret. Session tokens are random and stored only
 // as a SHA-256 hash. Nothing here logs a code or token.
 package auth
@@ -13,6 +15,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net/mail"
 	"strings"
@@ -27,9 +30,7 @@ import (
 // Errors returned by Service. Handlers map them to UI states (U2).
 var (
 	ErrInvalidEmail = errors.New("invalid email address")
-	ErrNotAllowed   = errors.New("email not allowed")
 	ErrInvalidCode  = errors.New("invalid or expired code")
-	ErrSendFailed   = errors.New("could not send email")
 )
 
 // RateLimitedError reports that a limit was hit and when to retry.
@@ -54,6 +55,7 @@ type pendingCode struct {
 type Service struct {
 	cfg  *config.Config
 	mail mailer.Sender
+	log  *slog.Logger
 	now  func() time.Time
 	key  []byte // HMAC key for codes; random per process
 
@@ -62,10 +64,12 @@ type Service struct {
 	mu       sync.Mutex
 	codes    map[string]*pendingCode // by normalized email
 	sessions map[string]*Session     // by SHA-256 of token
+
+	sends sync.WaitGroup // background code emails
 }
 
 // New returns a Service. now may be nil (time.Now).
-func New(cfg *config.Config, sender mailer.Sender, now func() time.Time) *Service {
+func New(cfg *config.Config, sender mailer.Sender, log *slog.Logger, now func() time.Time) *Service {
 	if now == nil {
 		now = time.Now
 	}
@@ -74,7 +78,7 @@ func New(cfg *config.Config, sender mailer.Sender, now func() time.Time) *Servic
 		panic(err)
 	}
 	return &Service{
-		cfg: cfg, mail: sender, now: now, key: key,
+		cfg: cfg, mail: sender, log: log, now: now, key: key,
 		codeIP:    ratelimit.New(cfg.CodeRequestsPerIPHour, time.Hour).WithClock(now),
 		codeEmail: ratelimit.New(cfg.CodeRequestsPerEmailHour, time.Hour).WithClock(now),
 		verifyIP:  ratelimit.New(cfg.VerifyPerIPHour, time.Hour).WithClock(now),
@@ -96,7 +100,9 @@ func NormalizeEmail(raw string) (string, error) {
 	return e, nil
 }
 
-// RequestCode emails a fresh code to an allowed address. Any earlier code for it is replaced.
+// RequestCode emails a fresh code to email if it is allowed, replacing any earlier code.
+// It returns nil whether or not the email is allowed, and sends in the background,
+// so callers can't tell the two apart. Only rate limits and malformed input are errors.
 func (s *Service) RequestCode(ctx context.Context, rawEmail, ip string) error {
 	if ok, retry := s.codeIP.Allow(ip); !ok {
 		return &RateLimitedError{retry}
@@ -105,29 +111,45 @@ func (s *Service) RequestCode(ctx context.Context, rawEmail, ip string) error {
 	if err != nil {
 		return err
 	}
-	if !s.cfg.EmailAllowed(email) {
-		return ErrNotAllowed
-	}
+	// Checked for every address, so a 429 says nothing about the allowlist either.
 	if ok, retry := s.codeEmail.Allow(email); !ok {
 		return &RateLimitedError{retry}
+	}
+	if !s.cfg.EmailAllowed(email) {
+		s.log.Info("code_rejected_not_allowed", "ip", ip)
+		return nil
 	}
 
 	code, err := randomCode()
 	if err != nil {
 		return err
 	}
+	p := &pendingCode{mac: s.mac(email, code), expires: s.now().Add(s.cfg.CodeTTL)}
 	s.mu.Lock()
-	s.codes[email] = &pendingCode{mac: s.mac(email, code), expires: s.now().Add(s.cfg.CodeTTL)}
+	s.codes[email] = p
 	s.mu.Unlock()
 
-	if err := s.mail.Send(ctx, email, "Your sign-in code", codeEmailBody(code, s.cfg.CodeTTL)); err != nil {
-		s.mu.Lock()
-		delete(s.codes, email)
-		s.mu.Unlock()
-		return fmt.Errorf("%w: %v", ErrSendFailed, err)
-	}
+	s.sends.Add(1)
+	go func() {
+		defer s.sends.Done()
+		// The mailer has its own timeout; the request may finish first.
+		err := s.mail.Send(context.WithoutCancel(ctx), email, "Your sign-in code", codeEmailBody(code, s.cfg.CodeTTL))
+		if err != nil {
+			s.mu.Lock()
+			if s.codes[email] == p { // don't drop a newer code
+				delete(s.codes, email)
+			}
+			s.mu.Unlock()
+			s.log.Error("code_send_failed", "error", err.Error())
+			return
+		}
+		s.log.Info("code_sent", "email", email)
+	}()
 	return nil
 }
+
+// Wait blocks until background code emails have finished.
+func (s *Service) Wait() { s.sends.Wait() }
 
 // Verify redeems a code. On success it returns a new session token; the code is spent.
 // A code is also discarded after VerifyAttemptsPerCode wrong guesses or once it expires.

@@ -25,7 +25,7 @@ $("email-form").addEventListener("submit", (e) => {
   const email = $("email").value.trim();
   submit(e.target, "/api/auth/request", { email }, (data) => {
     $("email-form").hidden = true; $("code-form").hidden = false;
-    $("sent-to").textContent = `We sent a code to ${email}. It expires in ${Math.round(data.expires_in_seconds / 60)} minutes.`;
+    $("sent-to").textContent = `If ${email} can sign in to this project, we've sent it a code. It expires in ${Math.round(data.expires_in_seconds / 60)} minutes. Nothing arrived? Check spam, or go back and check the address.`;
     $("code").focus();
   });
 });

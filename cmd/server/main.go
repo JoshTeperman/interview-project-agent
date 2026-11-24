@@ -31,7 +31,7 @@ func main() {
 	defer stop()
 
 	sender := &mail.SMTP{Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser, Pass: cfg.SMTPPass, FromName: cfg.SMTPFromName}
-	authSvc := auth.New(cfg, sender, nil)
+	authSvc := auth.New(cfg, sender, log, nil)
 	go authSvc.RunPruner(ctx, time.Minute)
 
 	srv := &http.Server{
@@ -46,6 +46,7 @@ func main() {
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		srv.Shutdown(shutdown)
+		authSvc.Wait() // let in-flight code emails finish
 	}()
 
 	log.Info("listening", "addr", cfg.ListenAddr)

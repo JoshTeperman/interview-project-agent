@@ -1,16 +1,17 @@
 # Authentication
 
-Interviewers sign in with a 6-digit code emailed to an allowed address (`internal/auth`, `internal/server`, `internal/mail`).
+Interviewers sign in with a 6-digit code emailed to an allowed address (`internal/auth`, `internal/server`, `internal/mail`). The request endpoint never reveals whether an address is allowed: status, body, and response time are the same either way (001-D11).
 
 ## Flow
 
 1. `GET /login` serves the login page. If the visitor already has a live session, it redirects to `/`.
 2. `POST /api/auth/request` `{"email": "..."}`
    - Checks the per-IP limit (`CODE_REQUESTS_PER_IP_HOUR`). This counts every request, including ones for disallowed or malformed emails.
-   - Normalises the email (trimmed, lower-case, bare address only) and checks it against `ALLOWED_EMAILS` and `ALLOWED_EMAIL_DOMAINS` (exact domain match).
-   - Checks the per-email limit (`CODE_REQUESTS_PER_EMAIL_HOUR`).
+   - Normalises the email (trimmed, lower-case, bare address only).
+   - Checks the per-email limit (`CODE_REQUESTS_PER_EMAIL_HOUR`). This applies to every address, allowed or not.
+   - Checks the email against `ALLOWED_EMAILS` and `ALLOWED_EMAIL_DOMAINS` (exact domain match). A disallowed email gets the same `200` response as an allowed one, and nothing is sent (001-D11).
    - Generates a code with `crypto/rand` and stores an HMAC-SHA256 of it under a random per-process key, valid for `CODE_TTL`. A new code replaces any earlier one for that email.
-   - Sends a plain-text email (subject "Your sign-in code", the code, the expiry, no links). If sending fails, the code is discarded.
+   - Responds `200 {"ok": true, "expires_in_seconds": N}`, then sends a plain-text email in the background (subject "Your sign-in code", the code, the expiry, no links). If sending fails, the code is discarded and the failure is logged. Shutdown waits for in-flight sends.
 3. `POST /api/auth/verify` `{"email": "...", "code": "..."}`
    - Checks the per-IP limit (`VERIFY_PER_IP_HOUR`).
    - Compares the MAC in constant time. A wrong guess counts against the code; after `VERIFY_ATTEMPTS_PER_CODE` wrong guesses the code is discarded. An expired code is discarded.
@@ -38,10 +39,8 @@ JSON error bodies are `{"error": code, "message": text}`.
 | 400 | `bad_request` | Malformed JSON or a body over 4 KB |
 | 401 | `invalid_code` | Wrong, expired, spent, or unknown code |
 | 401 | `unauthenticated` | Protected API route without a session |
-| 403 | `email_not_allowed` | Email not on the allowlist or an allowed domain |
 | 415 | `unsupported_media_type` | POST body isn't `application/json` (CSRF defence) |
 | 429 | `rate_limited` | Any limit hit; includes a `Retry-After` header and `retry_after_seconds` |
-| 502 | `email_send_failed` | SMTP failure |
 
 ## Email transport
 
@@ -53,7 +52,7 @@ Every response carries `X-Robots-Tag: noindex, nofollow`, `Content-Security-Poli
 
 ## Logging
 
-Logged: `code_sent` and `signed_in` (with the email), `code_rejected_not_allowed`, `code_rate_limited`, and `verify_rate_limited` (with the IP), and send errors. Never logged: codes, session tokens, the SMTP password, or API keys.
+Logged: `code_sent` and `signed_in` (with the email), `code_rejected_not_allowed`, `code_rate_limited`, and `verify_rate_limited` (with the IP), and `code_send_failed` (with the error). Logs are server-side only, so they may record what the response hides. Never logged: codes, session tokens, the SMTP password, or API keys.
 
 ## Client IP
 

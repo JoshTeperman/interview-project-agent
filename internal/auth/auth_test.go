@@ -3,7 +3,9 @@ package auth
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"regexp"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 
 // fakeMail records sent messages; set fail to simulate an SMTP error.
 type fakeMail struct {
+	mu   sync.Mutex
 	sent []sent
 	fail error
 }
@@ -19,6 +22,8 @@ type fakeMail struct {
 type sent struct{ to, subject, body string }
 
 func (f *fakeMail) Send(_ context.Context, to, subject, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.fail != nil {
 		return f.fail
 	}
@@ -55,12 +60,19 @@ func testConfig() *config.Config {
 
 func newSvc() (*Service, *fakeMail, *clock) {
 	m, c := &fakeMail{}, &clock{time.Unix(1_700_000_000, 0)}
-	return New(testConfig(), m, c.now), m, c
+	return New(testConfig(), m, slog.New(slog.DiscardHandler), c.now), m, c
+}
+
+// request asks for a code and waits for the background send.
+func request(s *Service, email, ip string) error {
+	err := s.RequestCode(context.Background(), email, ip)
+	s.Wait()
+	return err
 }
 
 func TestHappyPath(t *testing.T) {
 	s, m, _ := newSvc()
-	if err := s.RequestCode(context.Background(), "  Alice@Example.com ", "1.1.1.1"); err != nil {
+	if err := request(s, "  Alice@Example.com ", "1.1.1.1"); err != nil {
 		t.Fatal(err)
 	}
 	if m.sent[0].to != "alice@example.com" || m.sent[0].subject != "Your sign-in code" {
@@ -82,7 +94,7 @@ func TestHappyPath(t *testing.T) {
 
 func TestExplicitAllowlist(t *testing.T) {
 	s, m, _ := newSvc()
-	if err := s.RequestCode(context.Background(), "friend@gmail.com", "ip"); err != nil {
+	if err := request(s, "friend@gmail.com", "ip"); err != nil {
 		t.Fatal(err)
 	}
 	if len(m.sent) != 1 {
@@ -90,15 +102,15 @@ func TestExplicitAllowlist(t *testing.T) {
 	}
 }
 
-func TestDisallowedEmailRejectedAndNoMail(t *testing.T) {
+func TestDisallowedEmailLooksAllowedButGetsNoMail(t *testing.T) {
 	s, m, _ := newSvc()
 	for _, e := range []string{"eve@gmail.com", "eve@sub.example.com", "eve@example.com.evil.io"} {
-		if err := s.RequestCode(context.Background(), e, "ip"); !errors.Is(err, ErrNotAllowed) {
-			t.Errorf("%s: err = %v", e, err)
+		if err := request(s, e, "ip"); err != nil {
+			t.Errorf("%s: err = %v, want nil like an allowed email", e, err)
 		}
 	}
 	for _, e := range []string{"", "not-an-email", "Eve <eve@example.com>"} {
-		if err := s.RequestCode(context.Background(), e, "ip"); !errors.Is(err, ErrInvalidEmail) {
+		if err := request(s, e, "ip"); !errors.Is(err, ErrInvalidEmail) {
 			t.Errorf("%q: err = %v", e, err)
 		}
 	}
@@ -113,7 +125,7 @@ func TestDisallowedEmailRejectedAndNoMail(t *testing.T) {
 
 func TestCodeIsSingleUse(t *testing.T) {
 	s, m, _ := newSvc()
-	s.RequestCode(context.Background(), "a@example.com", "ip")
+	request(s, "a@example.com", "ip")
 	code := m.lastCode(t)
 	if _, err := s.Verify("a@example.com", code, "ip"); err != nil {
 		t.Fatal(err)
@@ -125,7 +137,7 @@ func TestCodeIsSingleUse(t *testing.T) {
 
 func TestCodeExpires(t *testing.T) {
 	s, m, c := newSvc()
-	s.RequestCode(context.Background(), "a@example.com", "ip")
+	request(s, "a@example.com", "ip")
 	c.t = c.t.Add(10 * time.Minute)
 	if _, err := s.Verify("a@example.com", m.lastCode(t), "ip"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expired code: err = %v", err)
@@ -134,9 +146,9 @@ func TestCodeExpires(t *testing.T) {
 
 func TestNewCodeReplacesOld(t *testing.T) {
 	s, m, _ := newSvc()
-	s.RequestCode(context.Background(), "a@example.com", "ip")
+	request(s, "a@example.com", "ip")
 	old := m.lastCode(t)
-	s.RequestCode(context.Background(), "a@example.com", "ip")
+	request(s, "a@example.com", "ip")
 	if m.lastCode(t) == old {
 		t.Skip("random codes collided")
 	}
@@ -147,7 +159,7 @@ func TestNewCodeReplacesOld(t *testing.T) {
 
 func TestWrongGuessesBurnCode(t *testing.T) {
 	s, m, _ := newSvc()
-	s.RequestCode(context.Background(), "a@example.com", "ip")
+	request(s, "a@example.com", "ip")
 	code := m.lastCode(t)
 	wrong := "000000"
 	if code == wrong {
@@ -163,7 +175,7 @@ func TestWrongGuessesBurnCode(t *testing.T) {
 
 func TestCodesStoredHashed(t *testing.T) {
 	s, m, _ := newSvc()
-	s.RequestCode(context.Background(), "a@example.com", "ip")
+	request(s, "a@example.com", "ip")
 	code := m.lastCode(t)
 	p := s.codes["a@example.com"]
 	if string(p.mac) == code || len(p.mac) != 32 {
@@ -174,23 +186,30 @@ func TestCodesStoredHashed(t *testing.T) {
 func TestRequestRateLimits(t *testing.T) {
 	s, _, c := newSvc()
 	for i := 0; i < 3; i++ {
-		if err := s.RequestCode(context.Background(), "a@example.com", "ip1"); err != nil {
+		if err := request(s, "a@example.com", "ip1"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	var rl *RateLimitedError
-	if err := s.RequestCode(context.Background(), "a@example.com", "ip2"); !errors.As(err, &rl) {
+	if err := request(s, "a@example.com", "ip2"); !errors.As(err, &rl) {
 		t.Fatalf("per-email limit: err = %v", err)
+	}
+	// The per-email limit applies to disallowed emails too, so a 429 reveals nothing.
+	for i := 0; i < 3; i++ {
+		request(s, "eve@gmail.com", "ip3")
+	}
+	if err := request(s, "eve@gmail.com", "ip4"); !errors.As(err, &rl) {
+		t.Fatalf("per-email limit, disallowed: err = %v", err)
 	}
 	// Per-IP limit applies even to disallowed emails, so the endpoint can't be used to probe.
 	for i := 0; i < 7; i++ {
-		s.RequestCode(context.Background(), "x@gmail.com", "ip1")
+		request(s, "x@gmail.com", "ip1")
 	}
-	if err := s.RequestCode(context.Background(), "b@example.com", "ip1"); !errors.As(err, &rl) {
+	if err := request(s, "b@example.com", "ip1"); !errors.As(err, &rl) {
 		t.Fatalf("per-IP limit: err = %v", err)
 	}
 	c.t = c.t.Add(time.Hour)
-	if err := s.RequestCode(context.Background(), "a@example.com", "ip1"); err != nil {
+	if err := request(s, "a@example.com", "ip1"); err != nil {
 		t.Fatalf("after window: %v", err)
 	}
 }
@@ -209,8 +228,8 @@ func TestVerifyRateLimitPerIP(t *testing.T) {
 func TestSendFailureDropsCode(t *testing.T) {
 	s, m, _ := newSvc()
 	m.fail = errors.New("smtp down")
-	if err := s.RequestCode(context.Background(), "a@example.com", "ip"); !errors.Is(err, ErrSendFailed) {
-		t.Fatalf("err = %v", err)
+	if err := request(s, "a@example.com", "ip"); err != nil {
+		t.Fatalf("err = %v, want nil (failures are logged, not returned)", err)
 	}
 	if len(s.codes) != 0 {
 		t.Fatal("unsent code kept")
@@ -219,7 +238,7 @@ func TestSendFailureDropsCode(t *testing.T) {
 
 func TestSessionExpiryAndTurnCap(t *testing.T) {
 	s, m, c := newSvc()
-	s.RequestCode(context.Background(), "a@example.com", "ip")
+	request(s, "a@example.com", "ip")
 	tok, _ := s.Verify("a@example.com", m.lastCode(t), "ip")
 	if !s.UseTurn(tok) || !s.UseTurn(tok) || s.UseTurn(tok) {
 		t.Fatal("turn cap of 2 not enforced")

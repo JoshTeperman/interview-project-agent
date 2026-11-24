@@ -158,19 +158,13 @@ func (s *Server) handleRequestCode(w http.ResponseWriter, r *http.Request) {
 	var rl *auth.RateLimitedError
 	switch {
 	case err == nil:
-		s.log.Info("code_sent", "email", strings.ToLower(strings.TrimSpace(req.Email)))
+		// Same answer for allowed and disallowed emails (001-D2).
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_in_seconds": int(s.cfg.CodeTTL.Seconds())})
 	case errors.As(err, &rl):
 		s.log.Warn("code_rate_limited", "ip", ip)
 		writeRateLimited(w, rl.RetryAfter)
 	case errors.Is(err, auth.ErrInvalidEmail):
 		writeError(w, http.StatusBadRequest, "invalid_email", "That doesn't look like an email address.")
-	case errors.Is(err, auth.ErrNotAllowed):
-		s.log.Info("code_rejected_not_allowed", "ip", ip)
-		writeError(w, http.StatusForbidden, "email_not_allowed", "That email address isn't on the access list for this project.")
-	case errors.Is(err, auth.ErrSendFailed):
-		s.log.Error("code_send_failed", "error", err.Error())
-		writeError(w, http.StatusBadGateway, "email_send_failed", "We couldn't send the email. Please try again in a minute.")
 	default:
 		s.log.Error("code_request_error", "error", err.Error())
 		writeError(w, http.StatusInternalServerError, "internal", "Something went wrong.")
