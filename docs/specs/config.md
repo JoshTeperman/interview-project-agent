@@ -14,7 +14,7 @@ The server reads all settings from environment variables at startup (`internal/c
 | `SMTP_PORT` | no | `587` | STARTTLS. |
 | `SMTP_USER` | yes | | |
 | `SMTP_PASS` | yes | | Google App Password. |
-| `SMTP_FROM_NAME` | no | `Interview Project Agent` | |
+| `SMTP_FROM_NAME` | no | `Josh Projects Guide` | |
 | `SNAPSHOT_DIR` | yes | | Must be an existing directory. Compose sets it to `/snapshot`. |
 | `DATA_DIR` | no | empty | Writable directory for the question log. Compose sets it to `/data`. |
 | `LISTEN_ADDR` | no | `:8080` | |
