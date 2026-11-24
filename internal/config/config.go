@@ -88,7 +88,7 @@ func LoadFrom(getenv func(string) string) (*Config, error) {
 		SMTPPort:     l.int("SMTP_PORT", 587),
 		SMTPUser:     l.required("SMTP_USER"),
 		SMTPPass:     l.required("SMTP_PASS"),
-		SMTPFromName: l.str("SMTP_FROM_NAME", "Interview Project Agent"),
+		SMTPFromName: l.str("SMTP_FROM_NAME", "Josh Projects Guide"),
 
 		SnapshotDir: l.required("SNAPSHOT_DIR"),
 		DataDir:     l.str("DATA_DIR", ""),
