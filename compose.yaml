@@ -1,0 +1,22 @@
+# App container skeleton. M4 adds the Tailscale Funnel sidecar and the egress
+# firewall; until then no port is published.
+services:
+  app:
+    build: .
+    image: interview-project-agent:latest
+    env_file: .env
+    environment:
+      SNAPSHOT_DIR: /snapshot
+      DATA_DIR: /data
+    volumes:
+      # The snapshot is copied onto the host with scp/rsync and mounted read-only (S-D11).
+      - ${SNAPSHOT_HOST_DIR:?set SNAPSHOT_HOST_DIR to the snapshot directory on the host}:/snapshot:ro
+      - ${DATA_HOST_DIR:-./data}:/data
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 128
+    restart: unless-stopped

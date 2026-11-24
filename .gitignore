@@ -4,3 +4,7 @@
 /bin/
 *.pem
 /data/
+/.claude/
+# Source docs imported from Notion stay local: they name private hosts and addresses.
+/docs/scoping.md
+/docs/decisions-log.md

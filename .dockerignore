@@ -1,0 +1,7 @@
+.git
+.claude
+.env
+.env.*
+docs
+bin
+data
