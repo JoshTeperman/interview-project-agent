@@ -11,7 +11,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/JoshTeperman/interview-project-agent/internal/auth"
 	"github.com/JoshTeperman/interview-project-agent/internal/config"
+	"github.com/JoshTeperman/interview-project-agent/internal/mail"
+	"github.com/JoshTeperman/interview-project-agent/internal/server"
 )
 
 func main() {
@@ -24,20 +27,20 @@ func main() {
 	}
 	log.Info("config loaded", "config", cfg.String())
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("ok\n"))
-	})
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	sender := &mail.SMTP{Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser, Pass: cfg.SMTPPass, FromName: cfg.SMTPFromName}
+	authSvc := auth.New(cfg, sender, nil)
+	go authSvc.RunPruner(ctx, time.Minute)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           mux,
+		Handler:           server.New(cfg, authSvc, log).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
