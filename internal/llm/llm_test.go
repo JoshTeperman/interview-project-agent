@@ -15,12 +15,13 @@ import (
 
 // fakeAPI records request bodies and replies with canned JSON, in order.
 type fakeAPI struct {
-	mu      sync.Mutex
-	path    string
-	bodies  []map[string]any
-	headers []http.Header
-	replies []string
-	status  int
+	mu       sync.Mutex
+	path     string
+	bodies   []map[string]any
+	headers  []http.Header
+	replies  []string
+	status   int
+	statuses []int // per request; overrides status
 }
 
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -36,10 +37,14 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.bodies = append(f.bodies, m)
 	f.headers = append(f.headers, r.Header.Clone())
 	w.Header().Set("Content-Type", "application/json")
-	if f.status != 0 {
+	w.Header().Set("Retry-After", "0")
+	i := len(f.bodies) - 1
+	switch {
+	case i < len(f.statuses):
+		w.WriteHeader(f.statuses[i])
+	case f.status != 0:
 		w.WriteHeader(f.status)
 	}
-	i := len(f.bodies) - 1
 	if i >= len(f.replies) {
 		i = len(f.replies) - 1
 	}
@@ -114,7 +119,7 @@ func TestAnthropicToolRoundTripAndCaching(t *testing.T) {
 
 	b1, b2 := f.bodies[0], f.bodies[1]
 	h := f.headers[0]
-	if (h.Get("X-Api-Key") != "sk-test-SECRETKEY" && h.Get("Authorization") != "Bearer sk-test-SECRETKEY") || h.Get("Anthropic-Version") == "" {
+	if h.Get("X-Api-Key") != "sk-test-SECRETKEY" || h.Get("Anthropic-Version") != "2026-10-21" || h.Get("Authorization") != "" {
 		t.Errorf("headers = %v", f.headers[0])
 	}
 	if get(b1, "model") != "test-model" || get(b1, "max_tokens") != 1000.0 {
@@ -228,6 +233,9 @@ func TestOpenAIErrorsDontLeakKeyAndKeepHistory(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.Status != 429 || strings.Contains(err.Error(), "SECRETKEY") {
 		t.Fatalf("err = %v", err)
 	}
+	if len(f.bodies) != 1+maxRetries {
+		t.Errorf("attempts = %d, want %d", len(f.bodies), 1+maxRetries)
+	}
 	if n := len(conv.(*openaiConv).history); n != 0 {
 		t.Fatalf("failed send changed history: %d items", n)
 	}
@@ -254,5 +262,20 @@ func TestNewValidates(t *testing.T) {
 	}
 	if _, err := New(Options{Provider: OpenAI, Model: "m", MaxOutputTokens: 1, Timeout: time.Second}); err == nil {
 		t.Fatal("missing key accepted")
+	}
+}
+
+func TestTransientErrorsAreRetried(t *testing.T) {
+	ok := `{"id":"m1","type":"message","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`
+	f := &fakeAPI{path: "/v1/messages", statuses: []int{529, 503}, replies: []string{`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`, `{}`, ok}}
+	r, err := newProvider(t, Anthropic, f).NewConversation("s", testTools).Send(context.Background(), "q", true)
+	if err != nil || r.Text != "hi" || len(f.bodies) != 3 {
+		t.Fatalf("r=%+v err=%v attempts=%d", r, err, len(f.bodies))
+	}
+	bad := &fakeAPI{path: "/v1/messages", status: 400, replies: []string{`{"type":"error","error":{"type":"invalid_request_error","message":"bad"}}`}}
+	_, err = newProvider(t, Anthropic, bad).NewConversation("s", testTools).Send(context.Background(), "q", true)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Message != "bad" || len(bad.bodies) != 1 {
+		t.Fatalf("400: err=%v attempts=%d", err, len(bad.bodies))
 	}
 }

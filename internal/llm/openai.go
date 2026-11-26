@@ -1,11 +1,9 @@
 package llm
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 )
@@ -17,8 +15,8 @@ const openaiBaseURL = "https://api.openai.com/v1"
 // set store=false so nothing is kept server-side; reasoning items therefore come
 // back encrypted and are passed back verbatim on later calls.
 //
-// It doesn't use the official Go SDK because compiling that SDK needs more memory
-// than the VPS has (see 002-D3). Field names follow the SDK's type definitions.
+// It is hand-written rather than using the official Go SDK so the image builds
+// within the VPS's memory (002-D3). Field names follow the SDK's type definitions.
 type openaiProvider struct {
 	http *http.Client
 	opts Options
@@ -101,17 +99,6 @@ type oaItem struct {
 	} `json:"content"`
 }
 
-// APIError is a non-2xx response from a provider. Message never contains the API key.
-type APIError struct {
-	Provider string
-	Status   int
-	Message  string
-}
-
-func (e *APIError) Error() string {
-	return fmt.Sprintf("%s API error %d: %s", e.Provider, e.Status, e.Message)
-}
-
 func (c *openaiConv) Send(ctx context.Context, text string, allowTools bool) (Reply, error) {
 	input := c.history[:len(c.history):len(c.history)]
 	for _, r := range c.pending {
@@ -134,29 +121,18 @@ func (c *openaiConv) Send(ctx context.Context, text string, allowTools bool) (Re
 		Include: []string{"reasoning.encrypted_content"},
 	})
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.p.base+"/responses", bytes.NewReader(body))
-	if err != nil {
-		return Reply{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.p.opts.APIKey)
-	req.Header.Set("Content-Type", "application/json")
-	res, err := c.p.http.Do(req)
+	raw, status, err := postJSON(ctx, c.p.http, c.p.base+"/responses", map[string]string{"Authorization": "Bearer " + c.p.opts.APIKey}, body)
 	if err != nil {
 		return Reply{}, fmt.Errorf("openai: %w", err)
 	}
-	defer res.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(res.Body, 32<<20))
-	if err != nil {
-		return Reply{}, fmt.Errorf("openai: read response: %w", err)
-	}
 	var resp oaResponse
 	jsonErr := json.Unmarshal(raw, &resp)
-	if res.StatusCode/100 != 2 {
-		msg := http.StatusText(res.StatusCode)
+	if status/100 != 2 {
+		msg := http.StatusText(status)
 		if jsonErr == nil && resp.Error != nil && resp.Error.Message != "" {
 			msg = resp.Error.Message
 		}
-		return Reply{}, &APIError{Provider: OpenAI, Status: res.StatusCode, Message: msg}
+		return Reply{}, &APIError{Provider: OpenAI, Status: status, Message: msg}
 	}
 	if jsonErr != nil {
 		return Reply{}, fmt.Errorf("openai: decode response: %w", jsonErr)

@@ -68,10 +68,10 @@ Paths that `read_file` or `list_files` returned successfully are reported as `so
 
 | Provider | Default model | API | Notes |
 | --- | --- | --- | --- |
-| `openai` | `gpt-6-luna` | `POST /v1/responses` via `net/http` | `store: false`; encrypted reasoning items requested and passed back verbatim; `tool_choice` `auto` or `none`; no retries. |
-| `anthropic` | `claude-haiku-5-5` | Messages API via `anthropic-sdk-go/v2` | `cache_control: ephemeral` on the system block (caches tools and system) and a top-level breakpoint (caches the conversation so far); the model's default thinking; the SDK retries 429 and 5xx up to twice. |
+| `openai` | `gpt-6-luna` | `POST /v1/responses` | `store: false`; encrypted reasoning items requested and passed back verbatim; `tool_choice` `auto` or `none`. |
+| `anthropic` | `claude-haiku-5-5` | `POST /v1/messages`, `anthropic-version: 2026-10-21` | `cache_control: ephemeral` on the system block (caches tools and system) and a top-level breakpoint (caches the conversation so far); the model's default thinking; reply content passed back byte-for-byte, thinking blocks included. |
 
-Each call has `LLM_MAX_OUTPUT_TOKENS` and `LLM_TIMEOUT`. Each session has one conversation, kept in the provider's own format and only appended to. It lives in memory and is dropped on logout, after `SESSION_TTL` idle, or on restart.
+Both are small `net/http` clients with no SDK dependency. Each call has `LLM_MAX_OUTPUT_TOKENS` and `LLM_TIMEOUT` per attempt. Connection errors, 429, and 5xx (including 529) are retried up to twice, waiting `Retry-After` (at most 10 seconds) or 0.5 then 1 second. Each session has one conversation, kept in the provider's own format and only appended to. It lives in memory and is dropped on logout, after `SESSION_TTL` idle, or on restart.
 
 ## Chat API
 
