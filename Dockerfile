@@ -4,7 +4,11 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
+# The build cache persists across image builds (BuildKit), so only the first
+# build compiles the standard library (~47 s on the 2-vCPU VPS). Clear it with
+# `docker builder prune`.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
 
 # distroless/static ships CA certificates (needed for HTTPS and SMTP STARTTLS)
 # and runs as uid 65532 ("nonroot").

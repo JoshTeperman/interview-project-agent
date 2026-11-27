@@ -38,6 +38,19 @@ Cold builds: modules already downloaded, empty build cache. "Container peak" is 
 | `docker build --no-cache`, time | not measured | 88 s |
 | Image | 23.9 MB | 17.6 MB |
 
+Most of a cold build is the standard library. On the VPS's 2 vCPUs, a cold build of a small program using only the standard library (`net/http`, `crypto/tls`, `net/smtp`, `encoding/json`, `log/slog`) takes 47.0 s, against 49.8 s for the server. With a warm cache, rebuilding the server takes 0.4 s, or 0.5 s after editing one file.
+
+So the `Dockerfile` keeps Go's build cache between image builds with a BuildKit cache mount (`docker-buildx` 0.30.1, Ubuntu package). With `docker buildx build`:
+
+| Image build | Time |
+| --- | --- |
+| First build, empty build cache (base images already pulled) | 55 s |
+| Rebuild after editing one Go file | 3 s |
+| Rebuild with unchanged source | 1 s |
+| `docker compose build` after editing one Go file | 3 s |
+
+The build cache takes 210 MB; `docker builder prune` clears it.
+
 The official OpenAI Go SDK v3.106.0 couldn't be compiled here at all: the compiler was killed for lack of memory even building one package at a time, with host usage at 3737 MB.
 
 ## Not yet verified

@@ -11,6 +11,7 @@
 - [x] Config: `LLM_MAX_OUTPUT_TOKENS`, `LLM_TIMEOUT`, `TOOL_OUTPUT_MAX_CHARS`, `OVERVIEW_MAX_CHARS`; startup fails closed on a bad snapshot
 - [x] `cmd/compare`: same questions against both providers, Markdown report
 - [x] `Dockerfile` copies `go.sum` (empty now, kept so adding a dependency later just works)
+- [x] `Dockerfile` keeps Go's build cache between image builds (BuildKit cache mount); `docker-buildx` installed on the VPS from Ubuntu packages
 - [x] Tests: traversal and symlink escapes, hidden secrets, tool behaviour, overview, step cap (1, 2, and 4 calls per reply), no shell tool, grounding rules in the prompt, provider request and response shapes, masking, chat error states
 - [x] Specs: `docs/specs/agent.md`; config spec updated
 - [ ] Live comparison run against both providers: needs `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` (dedicated keys with spend caps)

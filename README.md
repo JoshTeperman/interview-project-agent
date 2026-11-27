@@ -33,4 +33,6 @@ docker compose build
 docker compose up -d
 ```
 
+The image build needs BuildKit (`docker-buildx`). Go's build cache persists between builds, so only the first build compiles the standard library (about a minute on a 2-vCPU VPS); later builds take seconds. `docker builder prune` clears the cache.
+
 The container runs as a non-root user (uid 65532) on a read-only root filesystem, with all capabilities dropped and a 256 MB memory cap. The snapshot directory (`SNAPSHOT_HOST_DIR`) is mounted read-only at `/snapshot`, and `DATA_HOST_DIR` is mounted writable at `/data`.
