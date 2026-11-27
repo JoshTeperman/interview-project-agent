@@ -40,11 +40,13 @@ type Agent struct {
 }
 
 // New builds an Agent. The system prompt is the standing instructions followed
-// by the snapshot overview; it is fixed for the Agent's life so it caches.
+// by the snapshot overview inside <snapshot_overview> tags, which the prompt
+// marks as untrusted data. It is fixed for the Agent's life so it caches.
 func New(snap *snapshot.Snapshot, stepCap int) *Agent {
+	tag := snapshot.OverviewTag
 	return &Agent{
 		snap:    snap,
-		system:  prompts.System() + "\n\n" + snap.Overview(),
+		system:  prompts.System() + "\n\n<" + tag + ">\n" + snap.Overview() + "</" + tag + ">\n",
 		stepCap: stepCap,
 	}
 }
@@ -105,6 +107,9 @@ type Turn struct {
 	LLMCalls  int       `json:"llm_calls"`
 	CapHit    bool      `json:"cap_hit"`
 	Truncated bool      `json:"truncated"` // the answer hit the output token limit
+	// LastInputTokens is the input size of the turn's last model call: roughly
+	// how much of the context window the conversation now uses.
+	LastInputTokens int64 `json:"last_input_tokens"`
 }
 
 // Ask answers question in conv. onStep, if not nil, is called after each tool
@@ -119,6 +124,9 @@ func (a *Agent) Ask(ctx context.Context, conv llm.Conversation, question string,
 		reply, err := conv.Send(ctx, text, allowTools)
 		t.LLMCalls++
 		t.Usage.Add(reply.Usage)
+		if reply.Usage.InputTokens > 0 {
+			t.LastInputTokens = reply.Usage.InputTokens
+		}
 		if err != nil {
 			t.Sources = sorted(sources)
 			return t, err

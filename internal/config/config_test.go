@@ -30,7 +30,8 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("provider/model = %s/%s", c.LLMProvider, c.LLMModel)
 	}
 	if c.SMTPHost != "smtp.gmail.com" || c.SMTPPort != 587 || c.ToolStepCap != 6 ||
-		c.LLMMaxOutputTokens != 16000 || c.LLMTimeout != 120*time.Second || c.ToolOutputMaxChars != 20000 || c.OverviewMaxChars != 60000 {
+		c.LLMMaxOutputTokens != 16000 || c.LLMTimeout != 120*time.Second || c.ToolOutputMaxChars != 20000 || c.OverviewMaxChars != 60000 ||
+		c.QuestionTimeout != 3*time.Minute || c.ContextMaxInputTokens != 100000 {
 		t.Errorf("defaults wrong: %+v", c)
 	}
 	if got := strings.Join(c.AllowedDomains, ","); got != "example.com,other.org" {
@@ -59,6 +60,7 @@ func TestFailsClosed(t *testing.T) {
 		"snapshot missing":   {"SNAPSHOT_DIR": "/nonexistent/snapshot"},
 		"bad int":            {"TOOL_STEP_CAP": "six"},
 		"zero cap":           {"TOOL_STEP_CAP": "0"},
+		"tiny tool output":   {"TOOL_OUTPUT_MAX_CHARS": "500"},
 		"bad duration":       {"CODE_TTL": "-1m"},
 	}
 	for name, over := range cases {

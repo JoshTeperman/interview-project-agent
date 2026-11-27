@@ -31,13 +31,13 @@ A malformed `project.json` stops startup (exit code 2).
 Every path from the model is relative to the snapshot root (`""` or `/` is the root). Rejected:
 
 - absolute paths, `~`, backslashes, NUL bytes, and anything that cleans to `..` or `../...`: "path is outside the snapshot"
-- any path with a component that looks like VCS internals or a secret: "path is not available". Hidden names: `.git`, `.hg`, `.svn`, `.ssh`, `.gnupg`, `.aws`, `.docker`, `.netrc`, `.npmrc`, `.pypirc`, `.env`, `.env.*`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `id_dsa*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`. They are also left out of listings, searches, and the overview.
+- any path with a component that looks like VCS internals or a secret: "path is not available". Hidden names: `.git`, `.hg`, `.svn`, `.ssh`, `.gnupg`, `.aws`, `.docker`, `.netrc`, `.npmrc`, `.pypirc`, `.env`, `.envrc`, `.env.*`, `.env-*`, `.env_*`, `credentials.json`, `*.tfvars`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `id_dsa*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`. They are also left out of listings, searches, and the overview.
 
-Files are opened through `os.Root`, so a symlink (or `..`) that resolves outside the snapshot is refused. Symlinks that stay inside work.
+Symlinks are not available at all, even ones that stay inside the snapshot: each path component is checked with `Lstat` through `os.Root` before anything is opened, and links are left out of listings, searches, the tree, and the session index. A symlinked `project.json` stops startup.
 
 ### Overview
 
-Built at startup and placed after the standing instructions in the system prompt, capped at `OVERVIEW_MAX_CHARS`:
+Built at startup and placed after the standing instructions in the system prompt, inside `<snapshot_overview>` and `</snapshot_overview>`, capped at `OVERVIEW_MAX_CHARS`. The prompt says everything inside the tags is untrusted project data. Any copy of the tag in snapshot text is replaced with `[tag removed]`. Contents:
 
 1. Project name.
 2. Directory tree, 4 levels deep, up to 400 entries, at most a quarter of the budget.
@@ -50,9 +50,9 @@ The model gets exactly these three. There is no shell, write, or network tool. E
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `list_files` | `path` | One level: `name/` for directories, `name (size)` for files, `name (link)` for symlinks. Up to 500 entries. |
+| `list_files` | `path` | One level: `name/` for directories, `name (size)` for files. Up to 500 entries. |
 | `search_files` | `query` (2 to 200 characters), optional `path` | Literal, case-insensitive line matches as `path:line: text` (lines cut at 240 characters), up to 50. Skips binary files and files over 1 MB. "No matches" names the scope and the number of files searched. |
-| `read_file` | `path`, optional `start_line`, `end_line` | A header `path (lines a-b of n)`, then numbered lines. Long output stops at a line boundary with `call read_file with start_line=N to continue`. Refuses directories, binary files (a NUL in the first 8 KB), and files over 4 MB. |
+| `read_file` | `path`, optional `start_line`, `end_line` | A header `path (lines a-b of n)`, then numbered lines. Long output stops at a line boundary with `call read_file with start_line=N to continue`. A single line longer than the cap (minified code) is cut with `[line N cut at X of Y chars]`. Refuses directories, binary files (a NUL in the first 8 KB), and files over 4 MB. |
 
 ## Agent loop
 
@@ -71,7 +71,9 @@ Paths that `read_file` or `list_files` returned successfully are reported as `so
 | `openai` | `gpt-6-luna` | `POST /v1/responses` | `store: false`; encrypted reasoning items requested and passed back verbatim; `tool_choice` `auto` or `none`. |
 | `anthropic` | `claude-haiku-5-5` | `POST /v1/messages`, `anthropic-version: 2026-10-21` | `cache_control: ephemeral` on the system block (caches tools and system) and a top-level breakpoint (caches the conversation so far); the model's default thinking; reply content passed back byte-for-byte, thinking blocks included. |
 
-Both are small `net/http` clients with no SDK dependency. Each call has `LLM_MAX_OUTPUT_TOKENS` and `LLM_TIMEOUT` per attempt. Connection errors, 429, and 5xx (including 529) are retried up to twice, waiting `Retry-After` (at most 10 seconds) or 0.5 then 1 second. Each session has one conversation, kept in the provider's own format and only appended to. It lives in memory and is dropped on logout, after `SESSION_TTL` idle, or on restart.
+Both are small `net/http` clients with no SDK dependency. Each call has `LLM_MAX_OUTPUT_TOKENS` and `LLM_TIMEOUT` per attempt. 429 and 5xx (including 529) are retried up to twice, waiting `Retry-After` (at most 10 seconds) or 0.5 then 1 second. Connection errors are retried only if the request was never sent (dial, TLS, connection refused); a timeout after sending is not retried, since the reply may already be billed. A whole question, including retries and tools, is bounded by `QUESTION_TIMEOUT`. Each session has one conversation, kept in the provider's own format and only appended to. It lives in memory and is dropped on logout, after `SESSION_TTL` idle, or on restart.
+
+Context limit: before each question, if the last model call's input tokens plus a worst-case estimate for one question (`(TOOL_STEP_CAP × TOOL_OUTPUT_MAX_CHARS + MAX_MESSAGE_CHARS) / 3`) would exceed `CONTEXT_MAX_INPUT_TOKENS`, the session starts a fresh conversation and the response has `conversation_reset: true`. If the provider still rejects the input as too long (OpenAI `context_length_exceeded`; Anthropic "prompt is too long" or 413), the question is retried once in a fresh conversation, then fails with `conversation_full`.
 
 ## Chat API
 
@@ -88,7 +90,8 @@ Both routes need a session (otherwise `401 unauthenticated`).
   "steps": [{"tool": "search_files", "target": "fsync"}, {"tool": "read_file", "target": "docs/decisions-log.md"}],
   "cap_hit": false,
   "truncated": false,
-  "turns_remaining": 39
+  "turns_remaining": 39,
+  "conversation_reset": false
 }
 ```
 
@@ -101,15 +104,16 @@ A step that failed has an `error` field. `truncated` means the answer hit the ou
 | 409 | `busy` | A question for this session is still running |
 | 415 | `unsupported_media_type` | Not JSON |
 | 422 | `model_refused` | The model declined (safety refusal) |
+| 422 | `conversation_full` | Even a fresh conversation was too long for the model |
 | 429 | `rate_limited` | Chat limit hit; `Retry-After` and `retry_after_seconds` |
 | 502 | `llm_error` | The provider returned an error |
-| 504 | `llm_timeout` | A model call timed out |
+| 504 | `llm_timeout` | A model call or the whole question (`QUESTION_TIMEOUT`) timed out |
 
 Error bodies never include the provider's error text.
 
 ## Question log
 
-With `DATA_DIR` set, each question that reaches the model appends one JSON line to `DATA_DIR/questions.jsonl` (mode 0600): `time`, `email`, `provider`, `model`, `prompt_version`, `question`, `tool_calls`, `cap_hit`, `sources`, `usage` (input, cached input, cache writes, output tokens), `latency_ms`, and `error`. Answers are not logged.
+With `DATA_DIR` set, each question that reaches the model appends one JSON line to `DATA_DIR/questions.jsonl` (mode 0600): `time`, `email`, `provider`, `model`, `prompt_version`, `question`, `tool_calls`, `cap_hit`, `conversation_reset`, `sources`, `usage` (input, cached input, cache writes, output tokens), `latency_ms`, and `error`. Answers are not logged.
 
 The question and error are masked first: the configured API keys and SMTP password, API-key and token shapes (`sk-…`, GitHub, Slack, AWS, JWTs, `bearer …`, `password: …`), opaque strings of 40 or more characters, and 6-digit numbers (possible magic codes) become `[redacted]`.
 

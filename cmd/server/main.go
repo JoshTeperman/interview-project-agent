@@ -63,6 +63,8 @@ func main() {
 	chatSvc := chat.New(ag, provider, qlog, log, chat.Options{
 		PerSessionMinute: cfg.ChatPerSessionMinute, PerIPMinute: cfg.ChatPerIPMinute,
 		MaxMessageChars: cfg.MaxMessageChars, IdleTTL: cfg.SessionTTL,
+		QuestionTimeout: cfg.QuestionTimeout, ContextMaxInputTokens: cfg.ContextMaxInputTokens,
+		TurnTokenBudget: chat.TurnTokenBudget(cfg.ToolStepCap, cfg.ToolOutputMaxChars, cfg.MaxMessageChars),
 	}, nil)
 	go chatSvc.RunPruner(ctx, time.Minute)
 	app := server.New(cfg, authSvc, log)

@@ -1,6 +1,9 @@
 // Package chat turns a signed-in interviewer's question into an agent turn:
 // it validates the message, applies chat limits (R10), keeps one append-only
 // conversation per session, and logs the question (R11).
+//
+// A conversation only grows, so before a question that could push it past
+// ContextMaxInputTokens the session starts a fresh one, and says so.
 package chat
 
 import (
@@ -27,7 +30,9 @@ var (
 	ErrTurnCap  = errors.New("session turn cap reached")
 	ErrTimeout  = errors.New("the model took too long to answer")
 	ErrUpstream = errors.New("the model provider returned an error")
-	ErrRefused  = llm.ErrRefused
+	// ErrContextFull means even a fresh conversation was too long for the model.
+	ErrContextFull = errors.New("conversation too long for the model")
+	ErrRefused     = llm.ErrRefused
 )
 
 // RateLimitedError reports that a chat limit was hit and when to retry.
@@ -41,6 +46,26 @@ type Options struct {
 	PerIPMinute      int
 	MaxMessageChars  int
 	IdleTTL          time.Duration // threads idle this long are dropped
+	QuestionTimeout  time.Duration // bounds one whole question
+	// ContextMaxInputTokens caps a conversation's input size. A fresh conversation
+	// starts when the last input size plus TurnTokenBudget would exceed it.
+	ContextMaxInputTokens int
+	// TurnTokenBudget is a worst-case estimate of the tokens one question adds.
+	TurnTokenBudget int
+}
+
+// TurnTokenBudget estimates the most input one question can add: the message
+// plus every tool result at its cap, at a conservative 3 characters per token.
+func TurnTokenBudget(stepCap, toolOutputMaxChars, maxMessageChars int) int {
+	return (stepCap*toolOutputMaxChars + maxMessageChars) / 3
+}
+
+// Answer is a completed question.
+type Answer struct {
+	agent.Turn
+	// ConversationReset is set when this question started a fresh conversation
+	// because the previous one was close to the context limit.
+	ConversationReset bool `json:"conversation_reset"`
 }
 
 // Service answers questions for signed-in sessions.
@@ -59,9 +84,10 @@ type Service struct {
 }
 
 type thread struct {
-	mu   sync.Mutex // held for a whole turn
-	conv llm.Conversation
-	last time.Time
+	mu        sync.Mutex // held for a whole turn
+	conv      llm.Conversation
+	last      time.Time
+	lastInput int64 // input tokens of the last model call
 }
 
 // New returns a Service. qlog may be nil. now may be nil (time.Now).
@@ -88,39 +114,61 @@ type Request struct {
 // Ask validates req, applies limits, and runs one agent turn in the session's
 // conversation. useTurn is called once the request passes every other check;
 // it returns false when the session's turn cap is spent. onStep may be nil.
-func (s *Service) Ask(ctx context.Context, req Request, useTurn func() bool, onStep func(agent.Step)) (agent.Turn, error) {
+func (s *Service) Ask(ctx context.Context, req Request, useTurn func() bool, onStep func(agent.Step)) (Answer, error) {
 	msg := strings.TrimSpace(req.Message)
 	if msg == "" {
-		return agent.Turn{}, ErrEmpty
+		return Answer{}, ErrEmpty
 	}
 	if utf8.RuneCountInString(msg) > s.opts.MaxMessageChars {
-		return agent.Turn{}, ErrTooLong
+		return Answer{}, ErrTooLong
 	}
 	if ok, retry := s.perIP.Allow(req.IP); !ok {
-		return agent.Turn{}, &RateLimitedError{retry}
+		return Answer{}, &RateLimitedError{retry}
 	}
 	if ok, retry := s.perSession.Allow(req.SessionKey); !ok {
-		return agent.Turn{}, &RateLimitedError{retry}
+		return Answer{}, &RateLimitedError{retry}
 	}
 
 	th := s.thread(req.SessionKey)
 	if !th.mu.TryLock() {
-		return agent.Turn{}, ErrBusy
+		return Answer{}, ErrBusy
 	}
 	defer th.mu.Unlock()
 	if !useTurn() {
-		return agent.Turn{}, ErrTurnCap
+		return Answer{}, ErrTurnCap
+	}
+
+	var ans Answer
+	if th.lastInput > 0 && th.lastInput+int64(s.opts.TurnTokenBudget) > int64(s.opts.ContextMaxInputTokens) {
+		s.reset(th)
+		ans.ConversationReset = true
+	}
+	if s.opts.QuestionTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.opts.QuestionTimeout)
+		defer cancel()
 	}
 
 	start := s.now()
 	turn, err := s.agent.Ask(ctx, th.conv, msg, onStep)
+	if errors.Is(err, llm.ErrContextLength) && !ans.ConversationReset {
+		// The estimate missed; the model call was refused, not billed. Retry once fresh.
+		s.reset(th)
+		ans.ConversationReset = true
+		turn, err = s.agent.Ask(ctx, th.conv, msg, onStep)
+	}
 	latency := time.Since(start)
 	th.last = s.now()
+	ans.Turn = turn
+	if err == nil {
+		th.lastInput = turn.LastInputTokens
+	}
 
 	entry := questionlog.Entry{
 		Time: start.UTC(), Email: req.Email, Provider: s.provider.Name(), Model: s.provider.Model(),
 		Prompt: prompts.Version(), Question: msg, Steps: len(turn.Steps), CapHit: turn.CapHit,
 		Sources: turn.Sources, Usage: turn.Usage, LatencyMS: latency.Milliseconds(),
+		ConversationReset: ans.ConversationReset,
 	}
 	err = classify(ctx, err)
 	if err != nil {
@@ -130,14 +178,21 @@ func (s *Service) Ask(ctx context.Context, req Request, useTurn func() bool, onS
 		s.log.Error("question_log_failed", "error", lerr.Error())
 	}
 	attrs := []any{"email", req.Email, "tool_calls", len(turn.Steps), "llm_calls", turn.LLMCalls, "cap_hit", turn.CapHit,
+		"conversation_reset", ans.ConversationReset, "last_input_tokens", turn.LastInputTokens,
 		"input_tokens", turn.Usage.InputTokens, "cached_input_tokens", turn.Usage.CachedInputTokens,
 		"output_tokens", turn.Usage.OutputTokens, "latency_ms", latency.Milliseconds()}
 	if err != nil {
 		s.log.Error("chat_turn_failed", append(attrs, "error", err.Error())...)
-		return turn, err
+		return ans, err
 	}
 	s.log.Info("chat_turn", attrs...)
-	return turn, nil
+	return ans, nil
+}
+
+// reset replaces th's conversation with a fresh one. The caller holds th.mu.
+func (s *Service) reset(th *thread) {
+	th.conv = s.agent.NewConversation(s.provider)
+	th.lastInput = 0
 }
 
 // classify maps provider and context errors to the package's errors, keeping
@@ -148,6 +203,8 @@ func classify(ctx context.Context, err error) error {
 		return nil
 	case errors.Is(err, llm.ErrRefused):
 		return ErrRefused
+	case errors.Is(err, llm.ErrContextLength):
+		return errors.Join(ErrContextFull, err)
 	case errors.Is(err, context.DeadlineExceeded), ctx.Err() != nil, isTimeout(err):
 		return errors.Join(ErrTimeout, err)
 	default:

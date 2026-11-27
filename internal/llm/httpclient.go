@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -17,16 +19,24 @@ const (
 	maxReplyBytes = 32 << 20
 )
 
+// ErrContextLength means the conversation no longer fits the model's context window.
+var ErrContextLength = errors.New("conversation is too long for the model's context window")
+
 // APIError is a non-2xx response from a provider. Message never contains the API key.
 type APIError struct {
 	Provider string
 	Status   int
 	Message  string
+	// ContextTooLong is set when the provider says the input exceeds the context window.
+	ContextTooLong bool
 }
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("%s API error %d: %s", e.Provider, e.Status, e.Message)
 }
+
+// Is makes errors.Is(err, ErrContextLength) true for context-window errors.
+func (e *APIError) Is(target error) bool { return target == ErrContextLength && e.ContextTooLong }
 
 // retryable reports whether a status is worth retrying: rate limits, server
 // errors, and Anthropic's 529 "overloaded".
@@ -35,13 +45,21 @@ func retryable(status int) bool {
 }
 
 // postJSON sends body to url and returns the response body and status. It
-// retries connection errors and retryable statuses up to maxRetries times,
-// waiting Retry-After (capped) or a short backoff. Each attempt is bounded by
-// the client's timeout. Retries never exceed the caller's context.
+// retries retryable statuses, and errors from before the request was sent
+// (dial, TLS, connection refused), up to maxRetries times, waiting Retry-After
+// (capped) or a short backoff. A timeout or failure after the request was sent
+// is not retried: the provider may already have generated, and billed, the reply.
+// Each attempt is bounded by the client's timeout and by ctx.
 func postJSON(ctx context.Context, c *http.Client, url string, headers map[string]string, body []byte) ([]byte, int, error) {
 	var lastErr error
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		var sent atomic.Bool
+		trace := &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				sent.Store(true)
+			}
+		}}
+		req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			return nil, 0, err
 		}
@@ -66,7 +84,7 @@ func postJSON(ctx context.Context, c *http.Client, url string, headers map[strin
 			}
 		}
 		if err != nil {
-			if ctx.Err() != nil || attempt == maxRetries {
+			if ctx.Err() != nil || attempt == maxRetries || sent.Load() {
 				return nil, 0, err
 			}
 			lastErr = err

@@ -265,6 +265,58 @@ func TestNewValidates(t *testing.T) {
 	}
 }
 
+// A call that times out after the request was sent may already be billed, so it
+// isn't retried. A connection that never got through is.
+func TestTimeoutAfterSendIsNotRetried(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		time.Sleep(300 * time.Millisecond)
+	}))
+	defer srv.Close()
+	p, _ := New(Options{Provider: Anthropic, Model: "m", APIKey: "k", MaxOutputTokens: 10, Timeout: 100 * time.Millisecond, BaseURL: srv.URL})
+	_, err := p.NewConversation("s", testTools).Send(context.Background(), "q", true)
+	mu.Lock()
+	defer mu.Unlock()
+	if err == nil || hits != 1 {
+		t.Fatalf("err=%v hits=%d, want one attempt", err, hits)
+	}
+
+	// Nothing listening: the request never leaves, so it is retried, then fails.
+	dead := httptest.NewServer(http.NotFoundHandler())
+	url := dead.URL
+	dead.Close()
+	start := time.Now()
+	p2, _ := New(Options{Provider: OpenAI, Model: "m", APIKey: "k", MaxOutputTokens: 10, Timeout: time.Second, BaseURL: url})
+	if _, err := p2.NewConversation("s", testTools).Send(context.Background(), "q", true); err == nil {
+		t.Fatal("expected a connection error")
+	}
+	if d := time.Since(start); d < 1400*time.Millisecond { // backoff 0.5 s + 1 s
+		t.Fatalf("connection refused not retried (took %v)", d)
+	}
+}
+
+func TestContextLengthErrors(t *testing.T) {
+	oa := &fakeAPI{path: "/responses", status: 400, replies: []string{`{"error":{"message":"too long","type":"invalid_request_error","code":"context_length_exceeded"}}`}}
+	_, err := newProvider(t, OpenAI, oa).NewConversation("s", testTools).Send(context.Background(), "q", true)
+	if !errors.Is(err, ErrContextLength) {
+		t.Errorf("openai: %v", err)
+	}
+	an := &fakeAPI{path: "/v1/messages", status: 400, replies: []string{`{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1200000 tokens > 1000000 maximum"}}`}}
+	_, err = newProvider(t, Anthropic, an).NewConversation("s", testTools).Send(context.Background(), "q", true)
+	if !errors.Is(err, ErrContextLength) {
+		t.Errorf("anthropic: %v", err)
+	}
+	other := &fakeAPI{path: "/v1/messages", status: 400, replies: []string{`{"type":"error","error":{"type":"invalid_request_error","message":"bad tool"}}`}}
+	_, err = newProvider(t, Anthropic, other).NewConversation("s", testTools).Send(context.Background(), "q", true)
+	if errors.Is(err, ErrContextLength) {
+		t.Errorf("ordinary 400 flagged as context length: %v", err)
+	}
+}
+
 func TestTransientErrorsAreRetried(t *testing.T) {
 	ok := `{"id":"m1","type":"message","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`
 	f := &fakeAPI{path: "/v1/messages", statuses: []int{529, 503}, replies: []string{`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`, `{}`, ok}}

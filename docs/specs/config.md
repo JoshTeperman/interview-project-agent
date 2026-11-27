@@ -12,6 +12,8 @@ The server reads all settings from environment variables at startup (`internal/c
 | `ANTHROPIC_API_KEY` | if provider is `anthropic` | | Dedicated key with a hard spend cap. |
 | `LLM_MAX_OUTPUT_TOKENS` | no | `16000` | Output token limit per model call, including reasoning. |
 | `LLM_TIMEOUT` | no | `120s` | Timeout per model call. Go duration. |
+| `QUESTION_TIMEOUT` | no | `3m` | Bounds one whole question: every model call, retry, and tool call. |
+| `CONTEXT_MAX_INPUT_TOKENS` | no | `100000` | A session starts a fresh conversation before its input could exceed this. See [agent.md](agent.md). |
 | `SMTP_HOST` | no | `smtp.gmail.com` | |
 | `SMTP_PORT` | no | `587` | STARTTLS. |
 | `SMTP_USER` | yes | | |
@@ -31,7 +33,7 @@ The server reads all settings from environment variables at startup (`internal/c
 | `MAX_MESSAGE_CHARS` | no | `2000` | |
 | `SESSION_TURN_CAP` | no | `40` | Chat turns per session. |
 | `TOOL_STEP_CAP` | no | `6` | Tool calls per question (S-D2). See [agent.md](agent.md). |
-| `TOOL_OUTPUT_MAX_CHARS` | no | `20000` | Text one tool call can return to the model. |
+| `TOOL_OUTPUT_MAX_CHARS` | no | `20000` | Text one tool call can return to the model. At least 2000. |
 | `OVERVIEW_MAX_CHARS` | no | `60000` | Size of the snapshot overview in the system prompt. |
 | `TRUST_FORWARDED_FOR` | no | `false` | Take the client IP from the last `X-Forwarded-For` entry. Only behind a trusted proxy. |
 

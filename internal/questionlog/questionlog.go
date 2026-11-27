@@ -24,18 +24,20 @@ const redacted = "[redacted]"
 
 // Entry is one logged question.
 type Entry struct {
-	Time      time.Time `json:"time"`
-	Email     string    `json:"email"`
-	Provider  string    `json:"provider"`
-	Model     string    `json:"model"`
-	Prompt    string    `json:"prompt_version"`
-	Question  string    `json:"question"`
-	Steps     int       `json:"tool_calls"`
-	CapHit    bool      `json:"cap_hit,omitempty"`
-	Sources   []string  `json:"sources,omitempty"`
-	Usage     llm.Usage `json:"usage"`
-	LatencyMS int64     `json:"latency_ms"`
-	Error     string    `json:"error,omitempty"`
+	Time     time.Time `json:"time"`
+	Email    string    `json:"email"`
+	Provider string    `json:"provider"`
+	Model    string    `json:"model"`
+	Prompt   string    `json:"prompt_version"`
+	Question string    `json:"question"`
+	Steps    int       `json:"tool_calls"`
+	CapHit   bool      `json:"cap_hit,omitempty"`
+	// ConversationReset: this question started a fresh conversation (context limit).
+	ConversationReset bool      `json:"conversation_reset,omitempty"`
+	Sources           []string  `json:"sources,omitempty"`
+	Usage             llm.Usage `json:"usage"`
+	LatencyMS         int64     `json:"latency_ms"`
+	Error             string    `json:"error,omitempty"`
 }
 
 // Logger appends entries to the question log. A nil *Logger discards entries.

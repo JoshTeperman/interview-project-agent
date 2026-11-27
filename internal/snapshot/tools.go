@@ -23,7 +23,7 @@ const (
 // List returns the entries of the directory at p, one per line: directories end
 // in "/", files show their size. Hidden secret paths are left out.
 func (s *Snapshot) List(p string) (string, error) {
-	rel, err := resolve(p)
+	rel, err := s.resolve(p)
 	if err != nil {
 		return "", err
 	}
@@ -38,7 +38,7 @@ func (s *Snapshot) List(p string) (string, error) {
 	fmt.Fprintf(&b, "%s:\n", displayPath(rel))
 	shown := 0
 	for _, e := range entries {
-		if deniedName(e.Name()) {
+		if deniedName(e.Name()) || e.Type()&fs.ModeSymlink != 0 {
 			continue
 		}
 		if shown == maxListEntries {
@@ -49,8 +49,6 @@ func (s *Snapshot) List(p string) (string, error) {
 		switch {
 		case e.IsDir():
 			fmt.Fprintf(&b, "%s/\n", e.Name())
-		case e.Type()&fs.ModeSymlink != 0:
-			fmt.Fprintf(&b, "%s (link)\n", e.Name())
 		default:
 			size := int64(0)
 			if fi, err := e.Info(); err == nil {
@@ -72,7 +70,7 @@ func (s *Snapshot) Search(query, scope string) (string, error) {
 	if len(query) < minQueryLen || len(query) > maxQueryLen {
 		return "", fmt.Errorf("query must be %d to %d characters", minQueryLen, maxQueryLen)
 	}
-	rel, err := resolve(scope)
+	rel, err := s.resolve(scope)
 	if err != nil {
 		return "", err
 	}
@@ -135,7 +133,7 @@ func (s *Snapshot) Search(query, scope string) (string, error) {
 // answers can cite exact lines. Long output is cut at a line boundary with a note
 // saying how to continue.
 func (s *Snapshot) Read(p string, start, end int) (string, error) {
-	rel, err := resolve(p)
+	rel, err := s.resolve(p)
 	if err != nil {
 		return "", err
 	}
@@ -181,11 +179,20 @@ func (s *Snapshot) Read(p string, start, end int) (string, error) {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s (lines %d-%d of %d)\n", rel, start, end, total)
-	budget := s.limits.MaxToolChars - 200 // room for the header and the note
+	budget := max(s.limits.MaxToolChars-200, s.limits.MaxToolChars/2) // room for the header and the note
 	for n := start; n <= end; n++ {
 		line := fmt.Sprintf("%d\t%s\n", n, lines[n-1])
-		if b.Len()+len(line) > budget && n > start {
-			fmt.Fprintf(&b, "[truncated at line %d of %d; call read_file with start_line=%d to continue]\n", n-1, total, n)
+		if b.Len()+len(line) > budget {
+			if n > start {
+				fmt.Fprintf(&b, "[truncated at line %d of %d; call read_file with start_line=%d to continue]\n", n-1, total, n)
+				return b.String(), nil
+			}
+			// A single line longer than the budget (minified code, for example): cut the line itself.
+			keep := max(0, budget-b.Len()-80)
+			fmt.Fprintf(&b, "%d\t%s\n[line %d cut at %d of %d chars]\n", n, strings.ToValidUTF8(lines[n-1][:keep], ""), n, keep, len(lines[n-1]))
+			if n < end {
+				fmt.Fprintf(&b, "[call read_file with start_line=%d to continue]\n", n+1)
+			}
 			return b.String(), nil
 		}
 		b.WriteString(line)
@@ -248,7 +255,7 @@ func (s *Snapshot) walkVisible(maxDepth, maxEntries int) (paths []string, more i
 		if err != nil || p == "." {
 			return nil
 		}
-		if deniedName(d.Name()) {
+		if deniedName(d.Name()) || d.Type()&fs.ModeSymlink != 0 {
 			if d.IsDir() {
 				return fs.SkipDir
 			}

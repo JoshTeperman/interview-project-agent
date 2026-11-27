@@ -150,7 +150,9 @@ func (c *anthropicConv) Send(ctx context.Context, text string, allowTools bool) 
 		if jsonErr == nil && resp.Error != nil && resp.Error.Message != "" {
 			msg = resp.Error.Message
 		}
-		return Reply{}, &APIError{Provider: Anthropic, Status: status, Message: msg}
+		// "prompt is too long: N tokens > M maximum" (400), or a body over the request size limit (413).
+		ctxErr := status == http.StatusRequestEntityTooLarge || (status == http.StatusBadRequest && strings.Contains(strings.ToLower(msg), "prompt is too long"))
+		return Reply{}, &APIError{Provider: Anthropic, Status: status, Message: msg, ContextTooLong: ctxErr}
 	}
 	if jsonErr != nil {
 		return Reply{}, fmt.Errorf("anthropic: decode response: %w", jsonErr)

@@ -23,11 +23,13 @@ import (
 
 // fakeProvider answers by reading docs/spec.md once, then replying with reply.
 type fakeProvider struct {
-	mu    sync.Mutex
-	reply string
-	err   error
-	block chan struct{} // if set, Send waits on it
-	convs int
+	mu        sync.Mutex
+	reply     string
+	err       error
+	block     chan struct{} // if set, Send waits on it (or the context)
+	convs     int
+	input     int64 // InputTokens reported on each reply
+	ctxErrTil int   // conversations numbered below this fail with a context-length error
 }
 
 func (p *fakeProvider) Name() string  { return "fake" }
@@ -35,28 +37,41 @@ func (p *fakeProvider) Model() string { return "fake-model" }
 func (p *fakeProvider) NewConversation(string, []llm.ToolDef) llm.Conversation {
 	p.mu.Lock()
 	p.convs++
+	n := p.convs
 	p.mu.Unlock()
-	return &fakeConv{p: p}
+	return &fakeConv{p: p, n: n}
 }
 
 type fakeConv struct {
 	p       *fakeProvider
+	n       int
 	pending []llm.ToolResult
 }
 
 func (c *fakeConv) AddToolResults(rs []llm.ToolResult) { c.pending = append(c.pending, rs...) }
 func (c *fakeConv) Send(ctx context.Context, text string, _ bool) (llm.Reply, error) {
 	if c.p.block != nil {
-		<-c.p.block
+		select {
+		case <-c.p.block:
+		case <-ctx.Done():
+			return llm.Reply{}, ctx.Err()
+		}
 	}
 	if c.p.err != nil {
 		return llm.Reply{}, c.p.err
 	}
+	if c.n < c.p.ctxErrTil {
+		return llm.Reply{}, &llm.APIError{Provider: "fake", Status: 400, Message: "prompt is too long", ContextTooLong: true}
+	}
+	in := c.p.input
+	if in == 0 {
+		in = 10
+	}
 	if text != "" {
-		return llm.Reply{ToolCalls: []llm.ToolCall{{ID: "1", Name: agent.ToolRead, Args: json.RawMessage(`{"path":"docs/spec.md"}`)}}}, nil
+		return llm.Reply{ToolCalls: []llm.ToolCall{{ID: "1", Name: agent.ToolRead, Args: json.RawMessage(`{"path":"docs/spec.md"}`)}}, Usage: llm.Usage{InputTokens: in}}, nil
 	}
 	c.pending = nil
-	return llm.Reply{Text: c.p.reply, Usage: llm.Usage{InputTokens: 10, OutputTokens: 5}}, nil
+	return llm.Reply{Text: c.p.reply, Usage: llm.Usage{InputTokens: in, OutputTokens: 5}}, nil
 }
 
 type chatHarness struct {
@@ -65,7 +80,7 @@ type chatHarness struct {
 	dataDir string
 }
 
-func newChatHarness(t *testing.T, turnCap int) *chatHarness {
+func newChatHarness(t *testing.T, turnCap int, tweak ...func(*chat.Options)) *chatHarness {
 	t.Helper()
 	cfg := &config.Config{
 		AllowedDomains: []string{"example.com"}, CodeTTL: 10 * time.Minute, SessionTTL: time.Hour,
@@ -86,9 +101,14 @@ func newChatHarness(t *testing.T, turnCap int) *chatHarness {
 	qlog, _ := questionlog.Open(dataDir)
 	t.Cleanup(func() { qlog.Close() })
 	prov := &fakeProvider{reply: "Append-only log (docs/spec.md)."}
-	c := chat.New(agent.New(snap, 6), prov, qlog, log, chat.Options{
+	opts := chat.Options{
 		PerSessionMinute: cfg.ChatPerSessionMinute, PerIPMinute: cfg.ChatPerIPMinute, MaxMessageChars: cfg.MaxMessageChars, IdleTTL: time.Hour,
-	}, nil)
+		QuestionTimeout: time.Minute, ContextMaxInputTokens: 100000, TurnTokenBudget: 40000,
+	}
+	for _, f := range tweak {
+		f(&opts)
+	}
+	c := chat.New(agent.New(snap, 6), prov, qlog, log, opts, nil)
 	s.EnableChat(c, snap.Project.StarterQuestions)
 	return &chatHarness{harness: &harness{h: s.Handler(), mail: m, logs: logs, srv: s, auth: a}, prov: prov, dataDir: dataDir}
 }
@@ -224,5 +244,58 @@ func TestLogoutDropsConversation(t *testing.T) {
 	h.do("POST", "/api/chat", `{"message":"q"}`, c2)
 	if h.prov.convs != 2 {
 		t.Fatalf("conversations = %d, want a fresh one after logout", h.prov.convs)
+	}
+}
+
+// A conversation close to the context limit is replaced before the next question.
+func TestConversationResetsNearContextLimit(t *testing.T) {
+	h := newChatHarness(t, 40)
+	h.prov.input = 70000 // + 40000 budget > 100000
+	c := h.login(t, "a@example.com")
+	first := decode(t, h.do("POST", "/api/chat", `{"message":"one"}`, c).Body)
+	h.prov.input = 1000 // the fresh conversation is small again
+	second := decode(t, h.do("POST", "/api/chat", `{"message":"two"}`, c).Body)
+	if first["conversation_reset"] != false || second["conversation_reset"] != true || h.prov.convs != 2 {
+		t.Fatalf("first=%v second=%v convs=%d", first["conversation_reset"], second["conversation_reset"], h.prov.convs)
+	}
+	third := decode(t, h.do("POST", "/api/chat", `{"message":"three"}`, c).Body)
+	if third["conversation_reset"] != false || h.prov.convs != 2 {
+		t.Fatalf("third=%v convs=%d", third["conversation_reset"], h.prov.convs)
+	}
+}
+
+// If the provider says the context is full anyway, the question is retried once
+// in a fresh conversation; if that fails too, the error is conversation_full.
+func TestContextLengthErrorRetriesFresh(t *testing.T) {
+	h := newChatHarness(t, 40)
+	h.prov.ctxErrTil = 2 // conversation 1 fails, conversation 2 works
+	c := h.login(t, "a@example.com")
+	w := h.do("POST", "/api/chat", `{"message":"q"}`, c)
+	if w.Code != 200 || decode(t, w.Body)["conversation_reset"] != true {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+
+	h2 := newChatHarness(t, 40)
+	h2.prov.ctxErrTil = 99
+	c2 := h2.login(t, "a@example.com")
+	w = h2.do("POST", "/api/chat", `{"message":"q"}`, c2)
+	if w.Code != 422 || decode(t, w.Body)["error"] != "conversation_full" || h2.prov.convs != 2 {
+		t.Fatalf("%d %s convs=%d", w.Code, w.Body, h2.prov.convs)
+	}
+}
+
+func TestQuestionTimeout(t *testing.T) {
+	h := newChatHarness(t, 40, func(o *chat.Options) { o.QuestionTimeout = 50 * time.Millisecond })
+	h.prov.block = make(chan struct{}) // never released
+	c := h.login(t, "a@example.com")
+	start := time.Now()
+	w := h.do("POST", "/api/chat", `{"message":"slow"}`, c)
+	if w.Code != 504 || decode(t, w.Body)["error"] != "llm_timeout" || time.Since(start) > 2*time.Second {
+		t.Fatalf("%d %s after %v", w.Code, w.Body, time.Since(start))
+	}
+	// The session is usable again straight away.
+	h.prov.block = nil
+	if w := h.do("POST", "/api/chat", `{"message":"again"}`, c); w.Code != 200 {
+		t.Fatalf("after timeout: %d %s", w.Code, w.Body)
 	}
 }

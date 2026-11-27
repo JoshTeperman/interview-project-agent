@@ -6,8 +6,15 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"regexp"
 	"strings"
 )
+
+// OverviewTag is the element that wraps the overview in the system prompt.
+// Copies of it inside snapshot text are removed so the text can't close it early.
+const OverviewTag = "snapshot_overview"
+
+var overviewTagRe = regexp.MustCompile(`(?i)<\s*/?\s*` + OverviewTag + `[^>]*>`)
 
 // defaultOverviewFiles are included in the overview, in this order, when
 // project.json doesn't list overview_files. Matching is exact; missing files are skipped.
@@ -72,7 +79,7 @@ func (s *Snapshot) Overview() string {
 		b.WriteString(text)
 		b.WriteString("\n")
 	}
-	return b.String()
+	return overviewTagRe.ReplaceAllString(b.String(), "[tag removed]")
 }
 
 func (s *Snapshot) treeSection() string {
@@ -111,7 +118,7 @@ func (s *Snapshot) sessionIndex() string {
 	fmt.Fprintf(&b, "## Session index (%s)\n\n", dir)
 	n := 0
 	for _, e := range entries {
-		if e.IsDir() || deniedName(e.Name()) {
+		if !e.Type().IsRegular() || deniedName(e.Name()) {
 			continue
 		}
 		if n == sessionEntries {
@@ -157,14 +164,14 @@ func (s *Snapshot) title(p string) string {
 
 func (s *Snapshot) sessionsDir() string {
 	if d := s.Project.SessionsDir; d != "" {
-		if rel, err := resolve(d); err == nil && rel != "." && s.isDir(rel) {
+		if rel, err := s.resolve(d); err == nil && rel != "." && s.isDir(rel) {
 			return rel
 		}
 		return ""
 	}
 	for _, d := range defaultSessionsDirs {
-		if s.isDir(d) {
-			return d
+		if rel, err := s.resolve(d); err == nil && s.isDir(rel) {
+			return rel
 		}
 	}
 	return ""
@@ -178,7 +185,7 @@ func (s *Snapshot) overviewFiles() []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, c := range candidates {
-		rel, err := resolve(c)
+		rel, err := s.resolve(c)
 		if err != nil || rel == "." || seen[rel] {
 			continue
 		}

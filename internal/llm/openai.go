@@ -132,7 +132,8 @@ func (c *openaiConv) Send(ctx context.Context, text string, allowTools bool) (Re
 		if jsonErr == nil && resp.Error != nil && resp.Error.Message != "" {
 			msg = resp.Error.Message
 		}
-		return Reply{}, &APIError{Provider: OpenAI, Status: status, Message: msg}
+		ctxErr := jsonErr == nil && resp.Error != nil && resp.Error.Code == "context_length_exceeded"
+		return Reply{}, &APIError{Provider: OpenAI, Status: status, Message: msg, ContextTooLong: ctxErr}
 	}
 	if jsonErr != nil {
 		return Reply{}, fmt.Errorf("openai: decode response: %w", jsonErr)

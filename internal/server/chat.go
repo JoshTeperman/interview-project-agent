@@ -58,6 +58,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "busy", "Still answering your last question. Wait for it to finish.")
 	case errors.Is(err, chat.ErrTurnCap):
 		writeError(w, http.StatusForbidden, "turn_cap_reached", "This session has used all its questions. Sign in again later or contact the candidate.")
+	case errors.Is(err, chat.ErrContextFull):
+		writeError(w, http.StatusUnprocessableEntity, "conversation_full", "That question needs more context than the model allows. Try a narrower question.")
 	case errors.Is(err, chat.ErrRefused):
 		writeError(w, http.StatusUnprocessableEntity, "model_refused", "The model declined to answer that question.")
 	case errors.Is(err, chat.ErrTimeout):
@@ -75,7 +77,8 @@ func (s *Server) turnsRemaining(token string) int {
 	return max(0, s.cfg.SessionTurnCap-sess.Turns)
 }
 
-func chatResponse(t agent.Turn, remaining int) map[string]any {
+func chatResponse(a chat.Answer, remaining int) map[string]any {
+	t := a.Turn
 	steps := t.Steps
 	if steps == nil {
 		steps = []agent.Step{}
@@ -86,6 +89,6 @@ func chatResponse(t agent.Turn, remaining int) map[string]any {
 	}
 	return map[string]any{
 		"answer": t.Answer, "sources": sources, "steps": steps, "cap_hit": t.CapHit,
-		"truncated": t.Truncated, "turns_remaining": remaining,
+		"truncated": t.Truncated, "turns_remaining": remaining, "conversation_reset": a.ConversationReset,
 	}
 }

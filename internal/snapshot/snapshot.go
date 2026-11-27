@@ -5,9 +5,11 @@
 // there (ingestion) is someone else's job, so a pull script can be added later
 // without touching the runtime (R7).
 //
-// Every path the model supplies goes through resolve, and every file is opened
-// through an os.Root, which refuses ".." and symlinks that lead outside the
-// snapshot. Secret-looking files (.env, keys, .git) are hidden entirely.
+// Every path the model supplies goes through resolve: a lexical check, then an
+// Lstat of each path component through an os.Root. Symlinks are not available
+// at all, even ones that stay inside the snapshot, because a link such as
+// docs/notes.md -> ../.env would otherwise expose a hidden file. Secret-looking
+// files (.env, keys, .git) are hidden entirely.
 package snapshot
 
 import (
@@ -71,9 +73,13 @@ func Open(dir string, limits Limits) (*Snapshot, error) {
 		return nil, fmt.Errorf("snapshot: %w", err)
 	}
 	s := &Snapshot{root: root, fsys: root.FS(), limits: limits}
-	b, err := fs.ReadFile(s.fsys, ProjectFile)
+	var b []byte
+	_, err = s.resolve(ProjectFile)
+	if err == nil {
+		b, err = fs.ReadFile(s.fsys, ProjectFile)
+	}
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	case errors.Is(err, ErrNotFound), errors.Is(err, fs.ErrNotExist):
 	case err != nil:
 		root.Close()
 		return nil, fmt.Errorf("snapshot: read %s: %w", ProjectFile, err)
@@ -90,9 +96,28 @@ func Open(dir string, limits Limits) (*Snapshot, error) {
 func (s *Snapshot) Close() error { return s.root.Close() }
 
 // resolve turns a model-supplied path into a clean path relative to the snapshot
-// root, or rejects it. "" and "/" mean the root. It is lexical; os.Root adds the
-// symlink check when the path is opened.
-func resolve(p string) (string, error) {
+// root, or rejects it. "" and "/" mean the root. Any symlink on the way, including
+// the final component, makes the path unavailable.
+func (s *Snapshot) resolve(p string) (string, error) {
+	rel, err := clean(p)
+	if err != nil || rel == "." {
+		return rel, err
+	}
+	parts := strings.Split(rel, "/")
+	for i := range parts {
+		fi, err := s.root.Lstat(strings.Join(parts[:i+1], "/"))
+		if err != nil {
+			return "", openErr(err)
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return "", ErrDenied
+		}
+	}
+	return rel, nil
+}
+
+// clean is the lexical half of resolve.
+func clean(p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if strings.ContainsAny(p, "\x00\\") {
 		return "", ErrOutside
@@ -133,7 +158,10 @@ func deniedName(name string) bool {
 	case ".git", ".hg", ".svn", ".ssh", ".gnupg", ".aws", ".netrc", ".npmrc", ".pypirc", ".docker":
 		return true
 	}
-	if n == ".env" || strings.HasPrefix(n, ".env.") {
+	switch {
+	case n == ".env", n == ".envrc", n == "credentials.json",
+		strings.HasPrefix(n, ".env."), strings.HasPrefix(n, ".env-"), strings.HasPrefix(n, ".env_"),
+		strings.HasSuffix(n, ".tfvars"):
 		return true
 	}
 	for _, pre := range []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"} {

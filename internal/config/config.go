@@ -38,12 +38,14 @@ type Config struct {
 	AllowedEmails  []string // lower-case
 
 	// LLM (S-D9).
-	LLMProvider        string
-	LLMModel           string
-	OpenAIAPIKey       string
-	AnthropicAPIKey    string
-	LLMMaxOutputTokens int           // per model call, including reasoning tokens
-	LLMTimeout         time.Duration // per model call
+	LLMProvider           string
+	LLMModel              string
+	OpenAIAPIKey          string
+	AnthropicAPIKey       string
+	LLMMaxOutputTokens    int           // per model call, including reasoning tokens
+	LLMTimeout            time.Duration // per model call
+	QuestionTimeout       time.Duration // whole question, all model calls and tools
+	ContextMaxInputTokens int           // start a fresh conversation before input would exceed this
 
 	// Email (S-D10).
 	SMTPHost     string
@@ -91,12 +93,14 @@ func LoadFrom(getenv func(string) string) (*Config, error) {
 		AllowedDomains: l.list("ALLOWED_EMAIL_DOMAINS", func(s string) string { return strings.TrimPrefix(s, "@") }),
 		AllowedEmails:  l.list("ALLOWED_EMAILS", nil),
 
-		LLMProvider:        strings.ToLower(l.str("LLM_PROVIDER", ProviderOpenAI)),
-		LLMModel:           l.str("LLM_MODEL", ""),
-		OpenAIAPIKey:       l.str("OPENAI_API_KEY", ""),
-		AnthropicAPIKey:    l.str("ANTHROPIC_API_KEY", ""),
-		LLMMaxOutputTokens: l.int("LLM_MAX_OUTPUT_TOKENS", 16000),
-		LLMTimeout:         l.duration("LLM_TIMEOUT", 120*time.Second),
+		LLMProvider:           strings.ToLower(l.str("LLM_PROVIDER", ProviderOpenAI)),
+		LLMModel:              l.str("LLM_MODEL", ""),
+		OpenAIAPIKey:          l.str("OPENAI_API_KEY", ""),
+		AnthropicAPIKey:       l.str("ANTHROPIC_API_KEY", ""),
+		LLMMaxOutputTokens:    l.int("LLM_MAX_OUTPUT_TOKENS", 16000),
+		LLMTimeout:            l.duration("LLM_TIMEOUT", 120*time.Second),
+		QuestionTimeout:       l.duration("QUESTION_TIMEOUT", 3*time.Minute),
+		ContextMaxInputTokens: l.int("CONTEXT_MAX_INPUT_TOKENS", 100000),
 
 		SMTPHost:     l.str("SMTP_HOST", "smtp.gmail.com"),
 		SMTPPort:     l.int("SMTP_PORT", 587),
@@ -152,11 +156,15 @@ func LoadFrom(getenv func(string) string) (*Config, error) {
 		"CHAT_PER_SESSION_MINUTE": c.ChatPerSessionMinute, "CHAT_PER_IP_MINUTE": c.ChatPerIPMinute,
 		"MAX_MESSAGE_CHARS": c.MaxMessageChars, "SESSION_TURN_CAP": c.SessionTurnCap, "TOOL_STEP_CAP": c.ToolStepCap,
 		"LLM_MAX_OUTPUT_TOKENS": c.LLMMaxOutputTokens, "TOOL_OUTPUT_MAX_CHARS": c.ToolOutputMaxChars,
-		"OVERVIEW_MAX_CHARS": c.OverviewMaxChars,
+		"OVERVIEW_MAX_CHARS": c.OverviewMaxChars, "CONTEXT_MAX_INPUT_TOKENS": c.ContextMaxInputTokens,
 	} {
 		if v <= 0 {
 			l.fail(name + " must be a positive integer")
 		}
+	}
+
+	if c.ToolOutputMaxChars > 0 && c.ToolOutputMaxChars < 2000 {
+		l.fail("TOOL_OUTPUT_MAX_CHARS must be at least 2000")
 	}
 
 	if err := errors.Join(l.errs...); err != nil {
