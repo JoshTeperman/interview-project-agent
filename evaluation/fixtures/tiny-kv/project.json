@@ -1,0 +1,10 @@
+{
+  "name": "tiny-kv",
+  "starter_questions": [
+    "Why does tiny-kv use an append-only log instead of rewriting the file?",
+    "What alternatives to fsync on every write were considered?",
+    "How is the log compacted, and when?"
+  ],
+  "overview_files": ["README.md", "docs/spec.md", "docs/decisions-log.md"],
+  "sessions_dir": "sessions"
+}

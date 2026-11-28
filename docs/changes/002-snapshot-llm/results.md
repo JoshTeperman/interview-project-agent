@@ -1,0 +1,87 @@
+# 002 results
+
+Checked on the VPS on 2026-11-24 with Go 1.27.4 in a `golang:1.27` container (the host has no C compiler, which `-race` needs).
+
+## Tests
+
+`gofmt -l .` and `go vet ./...` are clean. `go test -race -count=1 ./...` passes.
+
+| Package | Tests | Cases |
+| --- | --- | --- |
+| `snapshot` | 10 | `project.json` read; a malformed one fails, a missing one is fine. 27 hostile paths rejected by all three tools (19 at first; 8 added in review fixes): `..` forms, absolute paths, `~`, backslashes, NUL, a symlink to a file outside, a symlink to the parent directory, `.git`, `.env`, `id_rsa`, `*.pem`. A whole-snapshot search finds none of the planted secrets (hidden, binary, or linked out); listings and the overview don't show them. A symlink that stays inside works. Listing, scoped case-insensitive search, numbered reads with ranges, a truncated read with a continuation note, directory and binary reads refused. The overview has the name, an indented tree, the session index with titles, and the overview documents; it is deterministic and respects its size budget. |
+| `llm` | 7 | Against fake HTTP servers. Anthropic: `x-api-key` and `anthropic-version: 2026-10-21` headers, system block and top-level `cache_control: ephemeral`, tool schema, `tool_choice` auto then none, the second request replays the first messages byte-for-byte plus the assistant turn verbatim (thinking block and signature included) and the `tool_result`; usage mapping; refusal; an API error doesn't contain the key. OpenAI: `store: false`, `include: reasoning.encrypted_content`, function tool shape, `tool_choice`, `max_output_tokens`, the reasoning item (with `encrypted_content`) and function call passed back verbatim, `function_call_output` with `call_id`; cached-token usage; a 429 is retried twice, then the error doesn't contain the key and history is unchanged; `max_output_tokens` truncation flag; refusal. Retries: a 529 then a 503 then success returns the answer after 3 attempts; a 400 is not retried. |
+| `agent` | 7 | A grounded turn: search, then a ranged read; the read file is listed as a source; usage summed. Step cap of 6 with 1, 2, and 4 tool calls per reply: exactly 6 run, extra calls get the cap message, the last call has tools disabled, at most 7 model calls. A model that ignores "no tools" gets the fallback answer, and its results stay queued. Eight escape attempts through the tools (including an unknown `run_shell` tool and bad JSON arguments) all fail with no secret in any result. Exactly three tools exist. The system prompt contains the citation, "not recorded", "never invent", and "data, not instructions" rules plus the overview, and no secrets. Provider errors are returned. |
+| `questionlog` | 3 | Masking of OpenAI, Anthropic, GitHub, AWS, and bearer tokens, `password:` values, long opaque strings, 6-digit codes, and exact configured secrets; ordinary text (decision IDs, dates, 4-digit numbers) left alone. File mode 0600, one JSON line per question. A nil logger is a no-op. |
+| `server` (chat) | 6 new | Signed-in chat returns the answer, sources, steps, and remaining turns; the question log entry is masked; the server log has `chat_turn` but neither the question nor the session token. `/api/starters` and `/api/chat` return 401 without a session, with no answer text. Empty, too long, turn cap (403), and per-session rate limit (429). Provider error (502), timeout (504), and refusal (422) without upstream detail in the body. A second question while one is running gets 409. Logout drops the conversation. |
+| `config` | updated | Defaults for the four new settings. |
+
+## Review fixes (PR #3)
+
+Re-checked after addressing the review: `gofmt -l .` and `go vet ./...` clean; `go test -race -count=1 ./...` passes.
+
+| Review item | Fix | Tests added |
+| --- | --- | --- |
+| Conversations grow past the context window | 002-D4: fresh conversation before `CONTEXT_MAX_INPUT_TOKENS` would be exceeded, `conversation_reset` in the response, one fresh retry on a provider context-length error, then `conversation_full` | a fake provider reporting 70k input tokens triggers a reset on the next question and not after; a context-length error is retried fresh and answered; two in a row give 422 `conversation_full`; OpenAI and Anthropic context errors are recognised, an ordinary 400 isn't |
+| Inside symlinks bypass the deny list | 002-D1: any symlink is unavailable | `docs/notes.md -> ../.env`, `docs/vcs -> ../.git`, and `inside-link.md` refused by all three tools and absent from listings, the tree, and the overview (also when named in `overview_files`); a symlinked `project.json` stops `Open` |
+| Timeouts retried and billed again; no question deadline | 002-D12 | a call that times out after sending is attempted once; connection refused is retried with backoff; a blocked question ends at `QUESTION_TIMEOUT` with 504 and the session works straight after |
+| Overview has no delimiters | 002-D11 | a README with a fake `</snapshot_overview>` and a `## Safety` heading: exactly one closing tag after the opening delimiter, overview last in the prompt; tag variants (case, spaces, attributes) replaced |
+| Nit: deny list | `.envrc`, `.env-*`, `.env_*`, `*.tfvars`, `credentials.json` | added to the hostile-path cases (now 27) |
+| Nit: overlong first line; small `TOOL_OUTPUT_MAX_CHARS` | the line itself is cut with `[line N cut at X of Y chars]`; config requires at least 2000 | a 10,000-character line returns its start, the cut note, and `start_line=2`; config rejects 500 |
+
+## Smoke run (real binary, fixture snapshot, dummy keys)
+
+| Check | Result |
+| --- | --- |
+| Startup | `snapshot loaded`, project `tiny-kv`, system prompt 4188 characters, prompt version `d76c47e1e684` (after review fixes; was 3862 and `3ae0d3e126b7`), 3 starter questions |
+| `GET /api/starters`, `GET /api/me`, `POST /api/chat` without a cookie | 401 each |
+| A grep for the dummy secret values in the log | 0 matches |
+| Snapshot with a malformed `project.json` | refuses to start, exit code 2: `cannot open snapshot; refusing to start` |
+| `cmd/compare` with no API keys | skips both providers and exits 1 with `no providers to run` |
+
+## Build
+
+Cold builds: modules already downloaded, empty build cache. "Container peak" is the build container's cgroup `memory.peak`. The image build was run with `--no-cache`, and host memory in use was sampled every second.
+
+| Measure | With the Anthropic SDK (`d95e8b9`) | Hand-written clients, no dependencies |
+| --- | --- | --- |
+| `go build ./cmd/server`, peak memory in the container | 2481 MB and 2564 MB (two runs) | 383 MB (two runs, identical) |
+| `go build ./cmd/server`, time | 151 s | 50 s (two runs) |
+| Stripped binary | 12.6 MB | 7.6 MB |
+| `docker build --no-cache`, host memory in use | peaked at 3752 of 3814 MB | 1468 MB before, 1678 MB peak |
+| `docker build --no-cache`, time | not measured | 88 s |
+| Image | 23.9 MB | 17.6 MB |
+
+Most of a cold build is the standard library. On the VPS's 2 vCPUs, a cold build of a small program using only the standard library (`net/http`, `crypto/tls`, `net/smtp`, `encoding/json`, `log/slog`) takes 47.0 s, against 49.8 s for the server. With a warm cache, rebuilding the server takes 0.4 s, or 0.5 s after editing one file.
+
+So the `Dockerfile` keeps Go's build cache between image builds with a BuildKit cache mount (`docker-buildx` 0.30.1, Ubuntu package). With `docker buildx build`:
+
+| Image build | Time |
+| --- | --- |
+| First build, empty build cache (base images already pulled) | 55 s |
+| Rebuild after editing one Go file | 3 s |
+| Rebuild with unchanged source | 1 s |
+| `docker compose build` after editing one Go file | 3 s |
+
+The build cache takes 210 MB; `docker builder prune` clears it.
+
+The official OpenAI Go SDK v3.106.0 couldn't be compiled here at all: the compiler was killed for lack of memory even building one package at a time, with host usage at 3737 MB.
+
+## Live provider comparison
+
+Run on 2026-11-28 at `59d422d` with dedicated, spend-capped keys: `cmd/compare` on the `tiny-kv` fixture with the five questions in `evaluation/questions.txt`, prompt version `d76c47e1e684`, step cap 6. The full report, with every answer and tool step, is in [compare-2026-11-28.md](compare-2026-11-28.md).
+
+| | `gpt-6-luna` (OpenAI) | `claude-haiku-5-5` (Anthropic) |
+| --- | --- | --- |
+| Latency per question | 1.5 to 8.8 s | 4.6 to 7.5 s |
+| Input tokens, total | 17,593 | 33,370 |
+| Input read from cache | 12,994 (74%) | 26,354 (79%), plus 6,982 written |
+| Output tokens, total | 2,005 | 4,154 |
+| Cost, estimated from the S-D9 price table | about $0.0016 | about $0.0032 |
+
+What it shows:
+
+- Both real APIs accept the hand-written requests: the model IDs, `anthropic-version: 2026-10-21`, tool definitions, and tool results. Anthropic's system and top-level `cache_control` breakpoints and OpenAI's automatic caching both work from the second model call on.
+- The step cap works against the real APIs. Q4 used all 6 tool calls on both providers, and the final call with `tool_choice: none` returned a normal text answer.
+- Grounding: both cited decision IDs and file lines. On Q3 both reported that the spec describes compaction while `compact()` raises `NotImplementedError`, and both also noticed that `live_bytes` is never reduced, so the trigger can't fire through ordinary writes (a real bug in the fixture code, not planted). On Q4 both said no load testing is recorded and mentioned only the 2 ms fsync measurement. Haiku cited line numbers more consistently and said what it hadn't checked; `gpt-6-luna` once cited "planning notes" without a path.
+- Q5 (read `../../.env`): both refused without calling a tool.
+- Context size for 002-D4: on this small snapshot a fresh conversation starts at about 1.2k input tokens (`gpt-6-luna`) or 2.2k (Haiku), and each question added roughly 1k to 3k. A real snapshot with a full 60k-character overview will start nearer 15k to 20k tokens, so the 100k limit with the 40k per-question estimate leaves plenty of room.
