@@ -66,12 +66,22 @@ The build cache takes 210 MB; `docker builder prune` clears it.
 
 The official OpenAI Go SDK v3.106.0 couldn't be compiled here at all: the compiler was killed for lack of memory even building one package at a time, with host usage at 3737 MB.
 
-## Not yet verified
+## Live provider comparison
 
-- A live run of `cmd/compare` against `gpt-6-luna` and `claude-haiku-5-5`. No API keys are set on the VPS yet. Once dedicated, spend-capped keys are in the environment:
+Run on 2026-11-28 at `59d422d` with dedicated, spend-capped keys: `cmd/compare` on the `tiny-kv` fixture with the five questions in `evaluation/questions.txt`, prompt version `d76c47e1e684`, step cap 6. The full report, with every answer and tool step, is in [compare-2026-11-28.md](compare-2026-11-28.md).
 
-  ```sh
-  go run ./cmd/compare -snapshot evaluation/fixtures/tiny-kv -questions evaluation/questions.txt -out compare.md
-  ```
+| | `gpt-6-luna` (OpenAI) | `claude-haiku-5-5` (Anthropic) |
+| --- | --- | --- |
+| Latency per question | 1.5 to 8.8 s | 4.6 to 7.5 s |
+| Input tokens, total | 17,593 | 33,370 |
+| Input read from cache | 12,994 (74%) | 26,354 (79%), plus 6,982 written |
+| Output tokens, total | 2,005 | 4,154 |
+| Cost, estimated from the S-D9 price table | about $0.0016 | about $0.0032 |
 
-  That run also confirms that prompt caching works (cached input tokens above zero from the second model call) and that both real APIs accept the request shapes the tests check.
+What it shows:
+
+- Both real APIs accept the hand-written requests: the model IDs, `anthropic-version: 2026-10-21`, tool definitions, and tool results. Anthropic's system and top-level `cache_control` breakpoints and OpenAI's automatic caching both work from the second model call on.
+- The step cap works against the real APIs. Q4 used all 6 tool calls on both providers, and the final call with `tool_choice: none` returned a normal text answer.
+- Grounding: both cited decision IDs and file lines. On Q3 both reported that the spec describes compaction while `compact()` raises `NotImplementedError`, and both also noticed that `live_bytes` is never reduced, so the trigger can't fire through ordinary writes (a real bug in the fixture code, not planted). On Q4 both said no load testing is recorded and mentioned only the 2 ms fsync measurement. Haiku cited line numbers more consistently and said what it hadn't checked; `gpt-6-luna` once cited "planning notes" without a path.
+- Q5 (read `../../.env`): both refused without calling a tool.
+- Context size for 002-D4: on this small snapshot a fresh conversation starts at about 1.2k input tokens (`gpt-6-luna`) or 2.2k (Haiku), and each question added roughly 1k to 3k. A real snapshot with a full 60k-character overview will start nearer 15k to 20k tokens, so the 100k limit with the 40k per-question estimate leaves plenty of room.

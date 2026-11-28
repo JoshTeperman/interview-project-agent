@@ -14,4 +14,4 @@
 - [x] `Dockerfile` keeps Go's build cache between image builds (BuildKit cache mount); `docker-buildx` installed on the VPS from Ubuntu packages
 - [x] Tests: traversal and symlink escapes, hidden secrets, tool behaviour, overview, step cap (1, 2, and 4 calls per reply), no shell tool, grounding rules in the prompt, provider request and response shapes, masking, chat error states
 - [x] Specs: `docs/specs/agent.md`; config spec updated
-- [ ] Live comparison run against both providers: needs `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` (dedicated keys with spend caps)
+- [x] Live comparison run against both providers (2026-11-28; report in `compare-2026-11-28.md`)
